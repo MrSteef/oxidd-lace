@@ -2,11 +2,15 @@ use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
 /// Worker thread pool
 pub struct Workers {
+    #[cfg(not(feature = "lace"))]
     pub(crate) pool: rayon::ThreadPool,
     split_depth: AtomicU32,
+    #[cfg(feature = "lace")]
+    num_threads: usize,
 }
 
 impl Workers {
+    #[cfg(not(feature = "lace"))]
     pub(crate) fn new(threads: u32) -> Self {
         let stack_size = std::env::var("OXIDD_STACK_SIZE")
             .ok()
@@ -22,6 +26,15 @@ impl Workers {
         let split_depth = AtomicU32::new(Workers::auto_split_depth(&pool));
         Self { pool, split_depth }
     }
+    #[cfg(feature = "lace")]
+    pub(crate) fn new(threads: u32) -> Self {
+        // stack size is not (yet) configurable in Lace
+        // let pool = Mutex::new(lace::Lace::init(threads as usize));
+        // split depth is not really used with Lace
+        let split_depth = AtomicU32::new(0);
+        let num_threads = threads as usize;
+        Self { split_depth, num_threads }
+    }
 
     fn auto_split_depth(pool: &rayon::ThreadPool) -> u32 {
         let threads = pool.current_num_threads();
@@ -36,7 +49,14 @@ impl Workers {
 impl oxidd_core::WorkerPool for Workers {
     #[inline]
     fn current_num_threads(&self) -> usize {
-        self.pool.current_num_threads()
+        #[cfg(not(feature = "lace"))]
+        {
+            self.pool.current_num_threads()
+        }
+        #[cfg(feature = "lace")]
+        {
+            self.num_threads
+        }
     }
 
     #[inline(always)]
@@ -45,16 +65,31 @@ impl oxidd_core::WorkerPool for Workers {
     }
 
     fn set_split_depth(&self, depth: Option<u32>) {
-        let depth = match depth {
-            Some(d) => d,
-            None => Self::auto_split_depth(&self.pool),
-        };
-        self.split_depth.store(depth, Relaxed);
+        #[cfg(not(feature = "lace"))]
+        {
+            let depth = match depth {
+                Some(d) => d,
+                None => Self::auto_split_depth(&self.pool),
+            };
+            self.split_depth.store(depth, Relaxed);
+        }
+        #[cfg(feature = "lace")]
+        {
+            // setting split depth is not supported with Lace
+        }
     }
 
     #[inline]
     fn install<RA: Send>(&self, op: impl FnOnce() -> RA + Send) -> RA {
-        self.pool.install(op)
+        #[cfg(not(feature = "lace"))]
+        {
+            self.pool.install(op)
+        }
+        #[cfg(feature = "lace")]
+        {
+            // installing is not yet supported with Lace
+            op()
+        }
     }
 
     #[inline]
@@ -63,7 +98,15 @@ impl oxidd_core::WorkerPool for Workers {
         op_a: impl FnOnce() -> RA + Send,
         op_b: impl FnOnce() -> RB + Send,
     ) -> (RA, RB) {
-        self.pool.join(op_a, op_b)
+        #[cfg(not(feature = "lace"))]
+        {
+            self.pool.join(op_a, op_b)
+        }
+        #[cfg(feature = "lace")]
+        {
+            // joining is not yet supported with Lace
+            (op_a(), op_b())
+        }
     }
 
     #[inline]
@@ -71,11 +114,22 @@ impl oxidd_core::WorkerPool for Workers {
         &self,
         op: impl Fn(oxidd_core::BroadcastContext) -> RA + Sync,
     ) -> Vec<RA> {
-        self.pool.broadcast(|ctx| {
-            op(oxidd_core::BroadcastContext {
-                index: ctx.index() as u32,
-                num_threads: ctx.num_threads() as u32,
+        #[cfg(not(feature = "lace"))]
+        {
+            self.pool.broadcast(|ctx| {
+                op(oxidd_core::BroadcastContext {
+                    index: ctx.index() as u32,
+                    num_threads: ctx.num_threads() as u32,
+                })
             })
-        })
+        }
+        #[cfg(feature = "lace")]
+        {
+            // broadcasting is not yet supported with Lace
+            let num_threads = self.current_num_threads() as u32;
+            (0..num_threads)
+                .map(|index| op(oxidd_core::BroadcastContext { index, num_threads }))
+                .collect()
+        }
     }
 }

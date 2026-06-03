@@ -2287,7 +2287,9 @@ pub fn new_manager<
     manager.store = Arc::as_ptr(&arc);
     drop(manager);
 
+    #[cfg(not(feature = "lace"))]
     let store_addr = addr(&*arc);
+    #[cfg(not(feature = "lace"))]
     arc.workers.pool.spawn_broadcast(move |_| {
         // The workers are dedicated to this store.
         LOCAL_STORE_STATE.with(|state| state.current_store.set(store_addr))
@@ -2299,7 +2301,10 @@ pub fn new_manager<
         .name("oxidd mi gc".to_string())
         .spawn(move || {
             // The worker is dedicated to this store.
-            LOCAL_STORE_STATE.with(|state| state.current_store.set(store_addr));
+            #[cfg(not(feature = "lace"))]
+            {
+                LOCAL_STORE_STATE.with(|state| state.current_store.set(store_addr));
+            }
 
             let store = &*gc_mref.0;
             loop {

@@ -68,6 +68,58 @@ where
     Ok(h)
 }
 
+#[cfg(feature = "lace")]
+#[lace::lace_task]
+/// Recursively apply the 'not' operator to `f`
+fn apply_not_task<M>(manager: &M, f: Borrowed<M::Edge>) -> AllocResult<M::Edge>
+where
+    M: Manager<Terminal = BDDTerminal> + HasApplyCache<M, BDDOp>,
+    M::InnerNode: HasLevel,
+{
+    // if rec.should_switch_to_sequential() {
+    //     return apply_not(manager, SequentialRecursor, f);
+    // }
+    stat!(call BDDOp::Not);
+
+    let node = match manager.get_node(&f) {
+        Node::Inner(node) => node,
+        Node::Terminal(t) => return Ok(manager.get_terminal(!*t.borrow()).unwrap()),
+    };
+
+    // Query apply cache
+    stat!(cache_query BDDOp::Not);
+    if let Some(h) = manager
+        .apply_cache()
+        .get(manager, BDDOp::Not, &[f.borrowed()])
+    {
+        stat!(cache_hit BDDOp::Not);
+        return Ok(h);
+    }
+
+    let (ft, fe) = collect_children(node);
+    let level = node.level();
+
+    // rayon uses rec.unary, which then calls workers.join
+    // let (t, e) = rec.unary(apply_not, manager, ft, fe)?;
+
+    // instead, we use lace's join directly
+    let op = apply_not_task;
+    let (edge_a, edge_b) = join!(op(manager, ft), op(manager, fe));
+    let (t, e) = (
+        Ok(EdgeDropGuard::new(manager, edge_a?))?,
+        Ok(EdgeDropGuard::new(manager, edge_b?))?,
+    );
+
+    let h = reduce(manager, level, t.into_edge(), e.into_edge(), BDDOp::Not)?;
+
+    // Add to apply cache
+    manager
+        .apply_cache()
+        .add(manager, BDDOp::Not, &[f.borrowed()], h.borrowed());
+
+    Ok(h)
+}
+
 /// Recursively apply the binary operator `OP` to `f` and `g`
 ///
 /// We use a `const` parameter `OP` to have specialized version of this function
@@ -124,6 +176,85 @@ where
     };
 
     let (t, e) = rec.binary(apply_bin::<M, R, OP>, manager, (ft, gt), (fe, ge))?;
+    let h = reduce(manager, level, t.into_edge(), e.into_edge(), operator)?;
+
+    // Add to apply cache
+    manager
+        .apply_cache()
+        .add(manager, operator, &[op1, op2], h.borrowed());
+
+    Ok(h)
+}
+
+#[cfg(feature = "lace")]
+use lace::Worker;
+#[cfg(feature = "lace")]
+#[lace::lace_task]
+/// Recursively apply the binary operator `OP` to `f` and `g`
+///
+/// We use a `const` parameter `OP` to have specialized version of this function
+/// for each operator.
+fn apply_bin_task<M, const OP: u8>(
+    manager: &M,
+    f: Borrowed<M::Edge>,
+    g: Borrowed<M::Edge>,
+) -> AllocResult<M::Edge>
+where
+    M: Manager<Terminal = BDDTerminal> + HasApplyCache<M, BDDOp>,
+    M::InnerNode: HasLevel,
+{
+    // if rec.should_switch_to_sequential() {
+    //     return apply_bin::<M, _, OP>(manager, SequentialRecursor, f, g);
+    // }
+    stat!(call OP);
+
+    let (operator, op1, op2) = match super::terminal_bin::<M, OP>(manager, &f, &g) {
+        Operation::Binary(o, op1, op2) => (o, op1, op2),
+        Operation::Not(f) => {
+            return call!(apply_not_task(manager, f));
+        }
+        Operation::Done(h) => return Ok(h),
+    };
+
+    // Query apply cache
+    stat!(cache_query OP);
+    if let Some(h) = manager
+        .apply_cache()
+        .get(manager, operator, &[op1.borrowed(), op2.borrowed()])
+    {
+        stat!(cache_hit OP);
+        return Ok(h);
+    }
+
+    let fnode = manager.get_node(&f).unwrap_inner();
+    let gnode = manager.get_node(&g).unwrap_inner();
+    let flevel = fnode.level();
+    let glevel = gnode.level();
+    let level = std::cmp::min(flevel, glevel);
+
+    // Collect cofactors of all top-most nodes
+    let (ft, fe) = if flevel == level {
+        collect_children(fnode)
+    } else {
+        (f.borrowed(), f.borrowed())
+    };
+    let (gt, ge) = if glevel == level {
+        collect_children(gnode)
+    } else {
+        (g.borrowed(), g.borrowed())
+    };
+
+    // rayon uses rec.binary, which then calls workers.join
+    // let (t, e) = rec.binary(apply_bin::<M, R, OP>, manager, (ft, gt), (fe, ge))?;
+
+    // instead, we use lace's join directly
+    let op = apply_bin_task::<M, OP>;
+    let (edge_a, edge_b) = join!(op(manager, ft, gt), op(manager, fe, ge));
+    let (t, e) = (
+        Ok(EdgeDropGuard::new(manager, edge_a?))?,
+        Ok(EdgeDropGuard::new(manager, edge_b?))?,
+    );
+
     let h = reduce(manager, level, t.into_edge(), e.into_edge(), operator)?;
 
     // Add to apply cache
@@ -1371,9 +1502,24 @@ pub mod mt {
             rhs: &EdgeOfFunc<'id, Self>,
         ) -> AllocResult<EdgeOfFunc<'id, Self>> {
             let (lhs, rhs) = (lhs.borrowed(), rhs.borrowed());
-            let rec = ParallelRecursor::new(manager);
-            apply_bin::<_, _, { BDDOp::And as u8 }>(manager, rec, lhs, rhs)
+            #[cfg(not(feature = "lace"))]
+            {
+                let rec = ParallelRecursor::new(manager);
+                apply_bin::<_, _, { BDDOp::And as u8 }>(manager, rec, lhs, rhs)
+            }
+            #[cfg(feature = "lace")]
+            {
+                use oxidd_core::WorkerPool as _;
+
+                let threads = manager.workers().current_num_threads();
+                let op = apply_bin_task::<_, { BDDOp::And as u8 }>;
+
+                crate::lace_runtime::with_lace(threads, |lace| {
+                    lace::lace_run!(lace, op(manager, lhs, rhs))
+                })
+            }
         }
+
         #[inline]
         fn or_edge<'id>(
             manager: &Self::Manager<'id>,
@@ -1381,8 +1527,22 @@ pub mod mt {
             rhs: &EdgeOfFunc<'id, Self>,
         ) -> AllocResult<EdgeOfFunc<'id, Self>> {
             let (lhs, rhs) = (lhs.borrowed(), rhs.borrowed());
-            let rec = ParallelRecursor::new(manager);
-            apply_bin::<_, _, { BDDOp::Or as u8 }>(manager, rec, lhs, rhs)
+            #[cfg(not(feature = "lace"))]
+            {
+                let rec = ParallelRecursor::new(manager);
+                apply_bin::<_, _, { BDDOp::Or as u8 }>(manager, rec, lhs, rhs)
+            }
+            #[cfg(feature = "lace")]
+            {
+                use oxidd_core::WorkerPool as _;
+
+                let threads = manager.workers().current_num_threads();
+                let op = apply_bin_task::<_, { BDDOp::Or as u8 }>;
+
+                crate::lace_runtime::with_lace(threads, |lace| {
+                    lace::lace_run!(lace, op(manager, lhs, rhs))
+                })
+            }
         }
         #[inline]
         fn nand_edge<'id>(

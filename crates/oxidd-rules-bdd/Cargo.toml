@@ -24,6 +24,8 @@ fixedbitset = "0.5.7"
 # document feature flags
 document-features = "0.2"
 
+lace = {path = "../../../lace-for-oxidd/lace", optional = true }
+
 
 [features]
 default = ["simple", "complement-edge", "multi-threading"]
@@ -39,3 +41,6 @@ multi-threading = []
 
 ## Enable statistics generation
 statistics = []
+
+## Lace parallelism instead of rayon
+lace = ["dep:lace"]

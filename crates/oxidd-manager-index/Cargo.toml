@@ -31,6 +31,7 @@ fixedbitset = "0.5.7"
 
 # thread pool
 rayon = "1.10"
+lace = {path = "../../../lace-for-oxidd/lace", optional = true }
 
 # `CachePadded`
 crossbeam-utils = { version = "0.8", default-features = false }
@@ -53,3 +54,6 @@ statistics = []
 ## `Drop` implementation. So if the check fails, there will be a weird linker
 ## error. Using this feature in unoptimized builds may cause false positives.
 static_leak_check = []
+
+## Lace parallelism instead of rayon
+lace = ["dep:lace"]
