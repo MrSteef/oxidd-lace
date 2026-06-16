@@ -1243,58 +1243,90 @@ pub trait HasApplyCache<M: Manager, O: Copy> {
     fn apply_cache_mut(&mut self) -> &mut Self::ApplyCache;
 }
 
-/// Worker thread pool associated with a [`Manager`]
+/// Backend-neutral worker task.
+///
+/// `C` is the backend execution context:
+/// - Rayon: `()`
+/// - Lace:  `lace::Worker`
+///
+/// Captured state should be passed through `I`, not through a closure.
+pub type WorkerTask<C, I, O> = fn(&mut C, I) -> O;
+
+/// Worker thread pool associated with a [`Manager`].
 ///
 /// A manager having its own thread pool has the advantage that it may use
-/// thread-local storage for its workers to pre-allocate some resources (e.g.,
-/// slots for nodes) and thereby reduce lock contention.
+/// thread-local storage for its workers to pre-allocate some resources
+/// (e.g., slots for nodes) and thereby reduce lock contention.
 pub trait WorkerPool: Sync {
-    /// Get the current number of threads
+    /// Backend-specific execution context.
+    ///
+    /// Examples:
+    /// - Rayon-backed worker pool: `()`
+    /// - Lace-backed worker pool: `lace::Worker`
+    type Context;
+
+    /// Get the current number of threads.
     fn current_num_threads(&self) -> usize;
 
-    /// Get the recursion depth up to which operations are split
+    /// Get the recursion depth up to which operations are split.
     fn split_depth(&self) -> u32;
 
-    /// Set the recursion depth up to which operations are split
+    /// Set the recursion depth up to which operations are split.
     ///
     /// `None` means that the implementation should automatically choose the
     /// depth. `Some(0)` means that no operations are split.
     fn set_split_depth(&self, depth: Option<u32>);
 
-    /// Execute `op` within the thread pool
+    /// Execute `task(input)` within the thread pool.
+    ///
+    /// This is the root entry point into the backend's worker context.
     ///
     /// If this method is called from another thread pool, it may cooperatively
-    /// yield execution to that pool until `op` has finished.
-    fn install<R: Send>(&self, op: impl FnOnce() -> R + Send) -> R;
+    /// yield execution to that pool until `task` has finished.
+    fn install<I, O>(
+        &self,
+        task: WorkerTask<Self::Context, I, O>,
+        input: I,
+    ) -> O
+    where
+        I: Send,
+        O: Send;
 
-    /// Execute `op_a` and `op_b` in parallel within the thread pool
+    /// Execute `task_a(input_a)` and `task_b(input_b)` in parallel within the
+    /// thread pool.
     ///
     /// Note that the split depth has no influence on this method. Checking
     /// whether to split an operation must be done externally.
-    fn join<RA: Send, RB: Send>(
+    fn join<IA, IB, OA, OB>(
         &self,
-        op_a: impl FnOnce() -> RA + Send,
-        op_b: impl FnOnce() -> RB + Send,
-    ) -> (RA, RB);
+        cx: &mut Self::Context,
+        task_a: WorkerTask<Self::Context, IA, OA>,
+        input_a: IA,
+        task_b: WorkerTask<Self::Context, IB, OB>,
+        input_b: IB,
+    ) -> (OA, OB)
+    where
+        IA: Send,
+        IB: Send,
+        OA: Send,
+        OB: Send;
 
-    /// Execute `op` on every worker in the thread pool
+    /// Execute `op` on every worker in the thread pool.
     fn broadcast<R: Send>(&self, op: impl Fn(BroadcastContext) -> R + Sync) -> Vec<R>;
 
-    /// Execute `op` concurrently for every element of `slice`
+    /// Execute `op` concurrently for every element of `slice`.
     fn slice_for_each<T: Sync>(&self, slice: &[T], op: impl Fn(&T) + Sync) {
         match slice {
             [] => {}
             [x] => op(x),
             _ => {
                 let done = std::sync::atomic::AtomicU64::new(0);
-                self.broadcast(|_| {
-                    loop {
-                        let i = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        if i >= slice.len() as u64 {
-                            return;
-                        }
-                        op(&slice[i as usize])
+                self.broadcast(|_| loop {
+                    let i = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if i >= slice.len() as u64 {
+                        return;
                     }
+                    op(&slice[i as usize])
                 });
             }
         }

@@ -19,7 +19,9 @@ use oxidd_core::{
 use oxidd_derive::Function;
 use oxidd_dump::dot::DotStyle;
 
-use crate::recursor::{Recursor, SequentialRecursor};
+use crate::recursor::{
+    ApplyQuantDispatchInput, BinaryInput, Recursor, SequentialRecursor, SubstInput, TernaryInput, UnaryInput
+};
 use crate::stat;
 
 #[cfg(feature = "statistics")]
@@ -28,121 +30,95 @@ use super::{BDDOp, BDDTerminal, Operation, collect_children, reduce};
 
 // spell-checker:ignore fnode,gnode,hnode,vnode,flevel,glevel,hlevel,vlevel
 
-/// Recursively apply the 'not' operator to `f`
-fn apply_not<M, R: Recursor<M>>(manager: &M, rec: R, f: Borrowed<M::Edge>) -> AllocResult<M::Edge>
-where
-    M: Manager<Terminal = BDDTerminal> + HasApplyCache<M, BDDOp>,
-    M::InnerNode: HasLevel,
-{
-    if rec.should_switch_to_sequential() {
-        return apply_not(manager, SequentialRecursor, f);
-    }
-    stat!(call BDDOp::Not);
-
-    let node = match manager.get_node(&f) {
-        Node::Inner(node) => node,
-        Node::Terminal(t) => return Ok(manager.get_terminal(!*t.borrow()).unwrap()),
-    };
-
-    // Query apply cache
-    stat!(cache_query BDDOp::Not);
-    if let Some(h) = manager
-        .apply_cache()
-        .get(manager, BDDOp::Not, &[f.borrowed()])
-    {
-        stat!(cache_hit BDDOp::Not);
-        return Ok(h);
-    }
-
-    let (ft, fe) = collect_children(node);
-    let level = node.level();
-
-    let (t, e) = rec.unary(apply_not, manager, ft, fe)?;
-    let h = reduce(manager, level, t.into_edge(), e.into_edge(), BDDOp::Not)?;
-
-    // Add to apply cache
-    manager
-        .apply_cache()
-        .add(manager, BDDOp::Not, &[f.borrowed()], h.borrowed());
-
-    Ok(h)
-}
-
-#[cfg(feature = "lace")]
-#[lace::lace_task]
-/// Recursively apply the 'not' operator to `f`
-fn apply_not_task<M>(manager: &M, f: Borrowed<M::Edge>) -> AllocResult<M::Edge>
-where
-    M: Manager<Terminal = BDDTerminal> + HasApplyCache<M, BDDOp>,
-    M::InnerNode: HasLevel,
-{
-    // if rec.should_switch_to_sequential() {
-    //     return apply_not(manager, SequentialRecursor, f);
-    // }
-    stat!(call BDDOp::Not);
-
-    let node = match manager.get_node(&f) {
-        Node::Inner(node) => node,
-        Node::Terminal(t) => return Ok(manager.get_terminal(!*t.borrow()).unwrap()),
-    };
-
-    // Query apply cache
-    stat!(cache_query BDDOp::Not);
-    if let Some(h) = manager
-        .apply_cache()
-        .get(manager, BDDOp::Not, &[f.borrowed()])
-    {
-        stat!(cache_hit BDDOp::Not);
-        return Ok(h);
-    }
-
-    let (ft, fe) = collect_children(node);
-    let level = node.level();
-
-    // rayon uses rec.unary, which then calls workers.join
-    // let (t, e) = rec.unary(apply_not, manager, ft, fe)?;
-
-    // instead, we use lace's join directly
-    let op = apply_not_task;
-    let (edge_a, edge_b) = join!(op(manager, ft), op(manager, fe));
-    let (t, e) = (
-        Ok(EdgeDropGuard::new(manager, edge_a?))?,
-        Ok(EdgeDropGuard::new(manager, edge_b?))?,
-    );
-
-    let h = reduce(manager, level, t.into_edge(), e.into_edge(), BDDOp::Not)?;
-
-    // Add to apply cache
-    manager
-        .apply_cache()
-        .add(manager, BDDOp::Not, &[f.borrowed()], h.borrowed());
-
-    Ok(h)
-}
-
-/// Recursively apply the binary operator `OP` to `f` and `g`
-///
-/// We use a `const` parameter `OP` to have specialized version of this function
-/// for each operator.
-fn apply_bin<M, R: Recursor<M>, const OP: u8>(
-    manager: &M,
+/// Recursively apply the 'not' operator to `f`.
+fn apply_not<'a, M, R>(
+    manager: &'a M,
     rec: R,
-    f: Borrowed<M::Edge>,
-    g: Borrowed<M::Edge>,
+    f: Borrowed<'a, M::Edge>,
+    cx: &mut R::Context,
 ) -> AllocResult<M::Edge>
 where
     M: Manager<Terminal = BDDTerminal> + HasApplyCache<M, BDDOp>,
     M::InnerNode: HasLevel,
+    R: Recursor<M>,
 {
     if rec.should_switch_to_sequential() {
-        return apply_bin::<M, _, OP>(manager, SequentialRecursor, f, g);
+        let mut seq_cx = ();
+        return apply_not(manager, SequentialRecursor, f, &mut seq_cx);
+    }
+    stat!(call BDDOp::Not);
+
+    let node = match manager.get_node(&f) {
+        Node::Inner(node) => node,
+        Node::Terminal(t) => return Ok(manager.get_terminal(!*t.borrow()).unwrap()),
+    };
+
+    // Query apply cache
+    stat!(cache_query BDDOp::Not);
+    if let Some(h) = manager
+        .apply_cache()
+        .get(manager, BDDOp::Not, &[f.borrowed()])
+    {
+        stat!(cache_hit BDDOp::Not);
+        return Ok(h);
+    }
+
+    let (ft, fe) = collect_children(node);
+    let level = node.level();
+
+    let (t, e) = rec.unary(apply_not_task::<M, R>, manager, ft, fe, cx)?;
+    let h = reduce(manager, level, t.into_edge(), e.into_edge(), BDDOp::Not)?;
+
+    // Add to apply cache
+    manager
+        .apply_cache()
+        .add(manager, BDDOp::Not, &[f.borrowed()], h.borrowed());
+
+    Ok(h)
+}
+
+/// Task-shaped wrapper for recursively applying the 'not' operator.
+///
+/// This is what gets passed to `Recursor::unary`.
+fn apply_not_task<'a, M, R>(
+    cx: &mut R::Context,
+    input: UnaryInput<'a, M, R>,
+) -> AllocResult<M::Edge>
+where
+    M: Manager<Terminal = BDDTerminal> + HasApplyCache<M, BDDOp>,
+    M::InnerNode: HasLevel,
+    R: Recursor<M>,
+{
+    let (manager, rec, f) = input;
+    apply_not(manager, rec, f, cx)
+}
+
+/// Recursively apply the binary operator `OP` to `f` and `g`
+///
+/// We use a `const` parameter `OP` to have specialized version of this function
+/// for each operator.
+fn apply_bin<'a, M, R, const OP: u8>(
+    manager: &'a M,
+    rec: R,
+    f: Borrowed<'a, M::Edge>,
+    g: Borrowed<'a, M::Edge>,
+    cx: &mut R::Context,
+) -> AllocResult<M::Edge>
+where
+    M: Manager<Terminal = BDDTerminal> + HasApplyCache<M, BDDOp>,
+    M::InnerNode: HasLevel,
+    R: Recursor<M>,
+{
+    if rec.should_switch_to_sequential() {
+        let mut seq_cx = ();
+        return apply_bin::<M, _, OP>(manager, SequentialRecursor, f, g, &mut seq_cx);
     }
     stat!(call OP);
 
     let (operator, op1, op2) = match super::terminal_bin::<M, OP>(manager, &f, &g) {
         Operation::Binary(o, op1, op2) => (o, op1, op2),
         Operation::Not(f) => {
-            return apply_not(manager, rec, f);
+            return apply_not(manager, rec, f, cx);
         }
         Operation::Done(h) => return Ok(h),
     };
@@ -175,7 +151,7 @@ where
         (g.borrowed(), g.borrowed())
     };
 
-    let (t, e) = rec.binary(apply_bin::<M, R, OP>, manager, (ft, gt), (fe, ge))?;
+    let (t, e) = rec.binary(apply_bin_task::<M, R, OP>, manager, (ft, gt), (fe, ge), cx)?;
     let h = reduce(manager, level, t.into_edge(), e.into_edge(), operator)?;
 
     // Add to apply cache
@@ -186,92 +162,30 @@ where
     Ok(h)
 }
 
-#[cfg(feature = "lace")]
-use lace::Worker;
-#[cfg(feature = "lace")]
-#[lace::lace_task]
-/// Recursively apply the binary operator `OP` to `f` and `g`
+/// Task-shaped wrapper for recursively applying a binary operator.
 ///
-/// We use a `const` parameter `OP` to have specialized version of this function
-/// for each operator.
-fn apply_bin_task<M, const OP: u8>(
-    manager: &M,
-    f: Borrowed<M::Edge>,
-    g: Borrowed<M::Edge>,
+/// This is what gets passed to `Recursor::unary`.
+fn apply_bin_task<'a, M, R, const OP: u8>(
+    cx: &mut R::Context,
+    input: BinaryInput<'a, M, R>,
 ) -> AllocResult<M::Edge>
 where
     M: Manager<Terminal = BDDTerminal> + HasApplyCache<M, BDDOp>,
     M::InnerNode: HasLevel,
+    R: Recursor<M>,
 {
-    // if rec.should_switch_to_sequential() {
-    //     return apply_bin::<M, _, OP>(manager, SequentialRecursor, f, g);
-    // }
-    stat!(call OP);
-
-    let (operator, op1, op2) = match super::terminal_bin::<M, OP>(manager, &f, &g) {
-        Operation::Binary(o, op1, op2) => (o, op1, op2),
-        Operation::Not(f) => {
-            return call!(apply_not_task(manager, f));
-        }
-        Operation::Done(h) => return Ok(h),
-    };
-
-    // Query apply cache
-    stat!(cache_query OP);
-    if let Some(h) = manager
-        .apply_cache()
-        .get(manager, operator, &[op1.borrowed(), op2.borrowed()])
-    {
-        stat!(cache_hit OP);
-        return Ok(h);
-    }
-
-    let fnode = manager.get_node(&f).unwrap_inner();
-    let gnode = manager.get_node(&g).unwrap_inner();
-    let flevel = fnode.level();
-    let glevel = gnode.level();
-    let level = std::cmp::min(flevel, glevel);
-
-    // Collect cofactors of all top-most nodes
-    let (ft, fe) = if flevel == level {
-        collect_children(fnode)
-    } else {
-        (f.borrowed(), f.borrowed())
-    };
-    let (gt, ge) = if glevel == level {
-        collect_children(gnode)
-    } else {
-        (g.borrowed(), g.borrowed())
-    };
-
-    // rayon uses rec.binary, which then calls workers.join
-    // let (t, e) = rec.binary(apply_bin::<M, R, OP>, manager, (ft, gt), (fe, ge))?;
-
-    // instead, we use lace's join directly
-    let op = apply_bin_task::<M, OP>;
-    let (edge_a, edge_b) = join!(op(manager, ft, gt), op(manager, fe, ge));
-    let (t, e) = (
-        Ok(EdgeDropGuard::new(manager, edge_a?))?,
-        Ok(EdgeDropGuard::new(manager, edge_b?))?,
-    );
-
-    let h = reduce(manager, level, t.into_edge(), e.into_edge(), operator)?;
-
-    // Add to apply cache
-    manager
-        .apply_cache()
-        .add(manager, operator, &[op1, op2], h.borrowed());
-
-    Ok(h)
+    let (manager, rec, f, g) = input;
+    apply_bin::<M, R, OP>(manager, rec, f, g, cx)
 }
 
 /// Recursively apply the if-then-else operator (`if f { g } else { h }`)
-fn apply_ite<M, R: Recursor<M>>(
-    manager: &M,
+fn apply_ite<'a, M, R: Recursor<M>>(
+    manager: &'a M,
     rec: R,
-    f: Borrowed<M::Edge>,
-    g: Borrowed<M::Edge>,
-    h: Borrowed<M::Edge>,
+    f: Borrowed<'a, M::Edge>,
+    g: Borrowed<'a, M::Edge>,
+    h: Borrowed<'a, M::Edge>,
+    cx: &mut R::Context,
 ) -> AllocResult<M::Edge>
 where
     M: Manager<Terminal = BDDTerminal> + HasApplyCache<M, BDDOp>,
@@ -279,7 +193,8 @@ where
 {
     use BDDTerminal::*;
     if rec.should_switch_to_sequential() {
-        return apply_ite(manager, SequentialRecursor, f, g, h);
+        let mut seq_cx = ();
+        return apply_ite(manager, SequentialRecursor, f, g, h, &mut seq_cx);
     }
     stat!(call BDDOp::Ite);
 
@@ -288,10 +203,10 @@ where
         return Ok(manager.clone_edge(&g));
     }
     if f == g {
-        return apply_bin::<M, R, { BDDOp::Or as u8 }>(manager, rec, f, h);
+        return apply_bin::<M, R, { BDDOp::Or as u8 }>(manager, rec, f, h, cx);
     }
     if f == h {
-        return apply_bin::<M, R, { BDDOp::And as u8 }>(manager, rec, f, g);
+        return apply_bin::<M, R, { BDDOp::And as u8 }>(manager, rec, f, g, cx);
     }
     let fnode = match manager.get_node(&f) {
         Node::Inner(n) => n,
@@ -303,21 +218,21 @@ where
         (Node::Inner(gn), Node::Inner(hn)) => (gn, hn),
         (Node::Terminal(t), Node::Inner(_)) => {
             return match t.borrow() {
-                True => apply_bin::<M, R, { BDDOp::Or as u8 }>(manager, rec, f, h),
-                False => apply_bin::<M, R, { BDDOp::ImpStrict as u8 }>(manager, rec, f, h),
+                True => apply_bin::<M, R, { BDDOp::Or as u8 }>(manager, rec, f, h, cx),
+                False => apply_bin::<M, R, { BDDOp::ImpStrict as u8 }>(manager, rec, f, h, cx),
             };
         }
         (Node::Inner(_), Node::Terminal(t)) => {
             return match t.borrow() {
-                True => apply_bin::<M, R, { BDDOp::Imp as u8 }>(manager, rec, f, g),
-                False => apply_bin::<M, R, { BDDOp::And as u8 }>(manager, rec, f, g),
+                True => apply_bin::<M, R, { BDDOp::Imp as u8 }>(manager, rec, f, g, cx),
+                False => apply_bin::<M, R, { BDDOp::And as u8 }>(manager, rec, f, g, cx),
             };
         }
         (Node::Terminal(gt), Node::Terminal(_ht)) => {
             debug_assert_ne!(gt.borrow(), _ht.borrow()); // g == h is handled above
             return match gt.borrow() {
-                False => apply_not(manager, rec, f), // if f { ⊥ } else { ⊤ }
-                True => Ok(manager.clone_edge(&f)),  // if f { ⊤ } else { ⊥ }
+                False => apply_not(manager, rec, f, cx), // if f { ⊥ } else { ⊤ }
+                True => Ok(manager.clone_edge(&f)),      // if f { ⊤ } else { ⊥ }
             };
         }
     };
@@ -356,7 +271,7 @@ where
         (h.borrowed(), h.borrowed())
     };
 
-    let (t, e) = rec.ternary(apply_ite, manager, (ft, gt, ht), (fe, ge, he))?;
+    let (t, e) = rec.ternary(apply_ite_task, manager, (ft, gt, ht), (fe, ge, he), cx)?;
     let res = reduce(manager, level, t.into_edge(), e.into_edge(), BDDOp::Ite)?;
 
     manager
@@ -364,6 +279,22 @@ where
         .add(manager, BDDOp::Ite, &[f, g, h], res.borrowed());
 
     Ok(res)
+}
+
+/// Task-shaped wrapper for recursively applying a binary operator.
+///
+/// This is what gets passed to `Recursor::unary`.
+fn apply_ite_task<'a, M, R>(
+    cx: &mut R::Context,
+    input: TernaryInput<'a, M, R>,
+) -> AllocResult<M::Edge>
+where
+    M: Manager<Terminal = BDDTerminal> + HasApplyCache<M, BDDOp>,
+    M::InnerNode: HasLevel,
+    R: Recursor<M>,
+{
+    let (manager, rec, f, g, h) = input;
+    apply_ite::<M, R>(manager, rec, f, g, h, cx)
 }
 
 /// Prepare a substitution
@@ -417,19 +348,22 @@ where
     Ok(res)
 }
 
-fn substitute<M, R: Recursor<M>>(
-    manager: &M,
+fn substitute<'a, M, R>(
+    manager: &'a M,
     rec: R,
-    f: Borrowed<M::Edge>,
+    f: Borrowed<'a, M::Edge>,
     subst: &[M::Edge],
     cache_id: u32,
+    cx: &mut R::Context,
 ) -> AllocResult<M::Edge>
 where
     M: Manager<Terminal = BDDTerminal> + HasApplyCache<M, BDDOp>,
     M::InnerNode: HasLevel,
+    R: Recursor<M>,
 {
     if rec.should_switch_to_sequential() {
-        return substitute(manager, SequentialRecursor, f, subst, cache_id);
+        let mut seq_cx = ();
+        return substitute(manager, SequentialRecursor, f, subst, cache_id, &mut seq_cx);
     }
     stat!(call BDDOp::Substitute);
 
@@ -454,10 +388,11 @@ where
 
     let (t, e) = collect_children(node);
     let (t, e) = rec.subst(
-        substitute,
+        substitute_task,
         manager,
         (t, subst, cache_id),
         (e, subst, cache_id),
+        cx,
     )?;
     let res = apply_ite(
         manager,
@@ -465,6 +400,7 @@ where
         subst[level as usize].borrowed(),
         t.borrowed(),
         e.borrowed(),
+        cx,
     )?;
 
     // Insert into apply cache
@@ -476,6 +412,19 @@ where
     );
 
     Ok(res)
+}
+
+fn substitute_task<'a, M, R>(
+    cx: &mut R::Context,
+    input: SubstInput<'a, M, R>,
+) -> AllocResult<M::Edge>
+where
+    M: Manager<Terminal = BDDTerminal> + HasApplyCache<M, BDDOp>,
+    M::InnerNode: HasLevel,
+    R: Recursor<M>,
+{
+    let (manager, rec, f, subst, cache_id) = input;
+    substitute(manager, rec, f, subst, cache_id, cx)
 }
 
 /// Result of [`restrict_inner()`]
@@ -575,18 +524,21 @@ where
     }
 }
 
-fn restrict<M, R: Recursor<M>>(
-    manager: &M,
+fn restrict<'a, M, R>(
+    manager: &'a M,
     rec: R,
-    f: Borrowed<M::Edge>,
-    vars: Borrowed<M::Edge>,
+    f: Borrowed<'a, M::Edge>,
+    vars: Borrowed<'a, M::Edge>,
+    cx: &mut R::Context,
 ) -> AllocResult<M::Edge>
 where
     M: Manager<Terminal = BDDTerminal> + HasApplyCache<M, BDDOp>,
     M::InnerNode: HasLevel,
+    R: Recursor<M>,
 {
     if rec.should_switch_to_sequential() {
-        return restrict(manager, SequentialRecursor, f, vars);
+        let mut seq_cx = ();
+        return restrict(manager, SequentialRecursor, f, vars, &mut seq_cx);
     }
     stat!(call BDDOp::Restrict);
 
@@ -613,10 +565,11 @@ where
 
             let (ft, fe) = collect_children(fnode);
             let (t, e) = rec.binary(
-                restrict,
+                restrict_task,
                 manager,
                 (ft, vars.borrowed()),
                 (fe, vars.borrowed()),
+                cx,
             )?;
 
             let res = reduce(
@@ -636,23 +589,39 @@ where
     }
 }
 
+fn restrict_task<'a, M, R>(
+    cx: &mut R::Context,
+    input: BinaryInput<'a, M, R>,
+) -> AllocResult<M::Edge>
+where
+    M: Manager<Terminal = BDDTerminal> + HasApplyCache<M, BDDOp>,
+    M::InnerNode: HasLevel,
+    R: Recursor<M>,
+{
+    let (manager, rec, f, vars) = input;
+    restrict(manager, rec, f, vars, cx)
+}
+
 /// Compute the quantification `Q` over `vars`
 ///
 /// Note that `Q` is one of `BDDOp::And`, `BDDOp::Or`, or `BDDOp::Xor` as `u8`.
 /// This saves us another case distinction in the code (would not be present at
 /// runtime).
-fn quant<M, R: Recursor<M>, const Q: u8>(
-    manager: &M,
+fn quant<'a, M, R, const Q: u8>(
+    manager: &'a M,
     rec: R,
-    f: Borrowed<M::Edge>,
-    vars: Borrowed<M::Edge>,
+    f: Borrowed<'a, M::Edge>,
+    vars: Borrowed<'a, M::Edge>,
+    cx: &mut R::Context,
 ) -> AllocResult<M::Edge>
 where
     M: Manager<Terminal = BDDTerminal> + HasApplyCache<M, BDDOp>,
     M::InnerNode: HasLevel,
+    R: Recursor<M>,
 {
     if rec.should_switch_to_sequential() {
-        return quant::<M, _, Q>(manager, SequentialRecursor, f, vars);
+        let mut seq_cx = ();
+        return quant::<M, _, Q>(manager, SequentialRecursor, f, vars, &mut seq_cx);
     }
     let operator = match () {
         _ if Q == BDDOp::And as u8 => BDDOp::Forall,
@@ -715,24 +684,41 @@ where
     } else {
         vars.borrowed()
     };
-    let (t, e) = rec.binary(
-        quant::<M, R, Q>,
-        manager,
-        (ft, vt.borrowed()),
-        (fe, vt.borrowed()),
-    )?;
 
-    let res = if flevel == vlevel {
-        apply_bin::<M, _, Q>(manager, rec, t.borrowed(), e.borrowed())
-    } else {
-        reduce(manager, flevel, t.into_edge(), e.into_edge(), operator)
-    }?;
+    let res = {
+        let (t, e) = rec.binary(
+            quant_task::<M, R, Q>,
+            manager,
+            (ft, vt.borrowed()),
+            (fe, vt.borrowed()),
+            cx,
+        )?;
+
+        if flevel == vlevel {
+            apply_bin::<M, _, Q>(manager, rec, t.borrowed(), e.borrowed(), cx)
+        } else {
+            reduce(manager, flevel, t.into_edge(), e.into_edge(), operator)
+        }?
+    };
 
     manager
         .apply_cache()
         .add(manager, operator, &[f, vars], res.borrowed());
 
     Ok(res)
+}
+
+fn quant_task<'a, M, R, const Q: u8>(
+    cx: &mut R::Context,
+    input: BinaryInput<'a, M, R>,
+) -> AllocResult<M::Edge>
+where
+    M: Manager<Terminal = BDDTerminal> + HasApplyCache<M, BDDOp>,
+    M::InnerNode: HasLevel,
+    R: Recursor<M>,
+{
+    let (manager, rec, f, vars) = input;
+    quant::<M, R, Q>(manager, rec, f, vars, cx)
 }
 
 /// Recursively apply the binary operator `OP` to `f` and `g` while quantifying
@@ -747,19 +733,22 @@ where
 /// This saves us another case distinction in the code (would not be present at
 /// runtime). We use a `const` parameter `OP` to have specialized version of
 /// this function for each operator.
-fn apply_quant<M, R: Recursor<M>, const Q: u8, const OP: u8>(
+fn apply_quant<'a, M, R, const Q: u8, const OP: u8>(
     manager: &M,
     rec: R,
-    f: Borrowed<M::Edge>,
-    g: Borrowed<M::Edge>,
-    vars: Borrowed<M::Edge>,
+    f: Borrowed<'a, M::Edge>,
+    g: Borrowed<'a, M::Edge>,
+    vars: Borrowed<'a, M::Edge>,
+    cx: &mut R::Context,
 ) -> AllocResult<M::Edge>
 where
     M: Manager<Terminal = BDDTerminal> + HasApplyCache<M, BDDOp>,
     M::InnerNode: HasLevel,
+    R: Recursor<M>,
 {
     if rec.should_switch_to_sequential() {
-        return apply_quant::<M, _, Q, OP>(manager, SequentialRecursor, f, g, vars);
+        let mut seq_cx = ();
+        return apply_quant::<M, _, Q, OP>(manager, SequentialRecursor, f, g, vars, &mut seq_cx);
     }
     let operator = const { BDDOp::from_apply_quant(Q, OP) };
     stat!(call operator);
@@ -768,12 +757,12 @@ where
     let (f, g) = match super::terminal_bin::<M, OP>(manager, &f, &g) {
         Operation::Binary(_, f, g) => (f, g),
         Operation::Not(h) => {
-            let inverse = EdgeDropGuard::new(manager, apply_not(manager, rec, h)?);
-            return quant::<M, R, Q>(manager, rec, inverse.borrowed(), vars);
+            let inverse = EdgeDropGuard::new(manager, apply_not(manager, rec, h, cx)?);
+            return quant::<M, R, Q>(manager, rec, inverse.borrowed(), vars, cx);
         }
         Operation::Done(h) => {
             let h = EdgeDropGuard::new(manager, h);
-            return quant::<M, R, Q>(manager, rec, h.borrowed(), vars);
+            return quant::<M, R, Q>(manager, rec, h.borrowed(), vars, cx);
         }
     };
 
@@ -807,7 +796,7 @@ where
     let vnode = match manager.get_node(&vars) {
         Node::Inner(n) => n,
         // Empty variable set: just apply operation
-        Node::Terminal(_) => return apply_bin::<M, R, OP>(manager, rec, f, g),
+        Node::Terminal(_) => return apply_bin::<M, R, OP>(manager, rec, f, g, cx),
     };
 
     let vlevel = vnode.level();
@@ -819,7 +808,7 @@ where
 
     if min_level > vlevel {
         // We are beyond the variables to be quantified, so simply apply.
-        return apply_bin::<M, R, OP>(manager, rec, f, g);
+        return apply_bin::<M, R, OP>(manager, rec, f, g, cx);
     }
 
     // Query the cache
@@ -851,16 +840,19 @@ where
         (g.borrowed(), g.borrowed())
     };
 
-    let (t, e) = rec.ternary(
-        apply_quant::<M, R, Q, OP>,
-        manager,
-        (ft, gt, vt.borrowed()),
-        (fe, ge, vt.borrowed()),
-    )?;
-    let res = if min_level == vlevel {
-        apply_bin::<M, R, Q>(manager, rec, t.borrowed(), e.borrowed())?
-    } else {
-        reduce(manager, min_level, t.into_edge(), e.into_edge(), operator)?
+    let res = {
+        let (t, e) = rec.ternary(
+            apply_quant_task::<M, R, Q, OP>,
+            manager,
+            (ft, gt, vt.borrowed()),
+            (fe, ge, vt.borrowed()),
+            cx,
+        )?;
+        if min_level == vlevel {
+            apply_bin::<M, R, Q>(manager, rec, t.borrowed(), e.borrowed(), cx)?
+        } else {
+            reduce(manager, min_level, t.into_edge(), e.into_edge(), operator)?
+        }
     };
 
     manager
@@ -870,33 +862,72 @@ where
     Ok(res)
 }
 
-/// Dynamic dispatcher for [`apply_quant()`] and unique quantification
-///
-/// In contrast to [`apply_quant()`], the operator is not a const but a runtime
-/// parameter.
-fn apply_quant_dispatch<'a, M, R: Recursor<M>, const Q: u8>(
-    manager: &'a M,
-    rec: R,
-    op: BooleanOperator,
-    f: Borrowed<M::Edge>,
-    g: Borrowed<M::Edge>,
-    vars: Borrowed<M::Edge>,
+fn apply_quant_task<'a, M, R, const Q: u8, const OP: u8>(
+    cx: &mut R::Context,
+    input: TernaryInput<'a, M, R>,
 ) -> AllocResult<M::Edge>
 where
     M: Manager<Terminal = BDDTerminal> + HasApplyCache<M, BDDOp>,
     M::InnerNode: HasLevel,
+    R: Recursor<M>,
+{
+    let (manager, rec, f, g, vars) = input;
+    apply_quant::<M, R, Q, OP>(manager, rec, f, g, vars, cx)
+}
+
+/// Dynamic dispatcher for [`apply_quant()`] and unique quantification
+///
+/// In contrast to [`apply_quant()`], the operator is not a const but a runtime
+/// parameter.
+fn apply_quant_dispatch<'a, M, R, const Q: u8>(
+    manager: &'a M,
+    rec: R,
+    op: BooleanOperator,
+    f: Borrowed<'a, M::Edge>,
+    g: Borrowed<'a, M::Edge>,
+    vars: Borrowed<'a, M::Edge>,
+    cx: &mut R::Context
+) -> AllocResult<M::Edge>
+where
+    M: Manager<Terminal = BDDTerminal> + HasApplyCache<M, BDDOp>,
+    M::InnerNode: HasLevel,
+    R: Recursor<M>
 {
     use BooleanOperator::*;
     match op {
-        And => apply_quant::<_, _, Q, { BDDOp::And as u8 }>(manager, rec, f, g, vars),
-        Or => apply_quant::<_, _, Q, { BDDOp::Or as u8 }>(manager, rec, f, g, vars),
-        Xor => apply_quant::<_, _, Q, { BDDOp::Xor as u8 }>(manager, rec, f, g, vars),
-        Equiv => apply_quant::<_, _, Q, { BDDOp::Equiv as u8 }>(manager, rec, f, g, vars),
-        Nand => apply_quant::<_, _, Q, { BDDOp::Nand as u8 }>(manager, rec, f, g, vars),
-        Nor => apply_quant::<_, _, Q, { BDDOp::Nor as u8 }>(manager, rec, f, g, vars),
-        Imp => apply_quant::<_, _, Q, { BDDOp::Imp as u8 }>(manager, rec, f, g, vars),
-        ImpStrict => apply_quant::<_, _, Q, { BDDOp::ImpStrict as u8 }>(manager, rec, f, g, vars),
+        And => apply_quant::<_, _, Q, { BDDOp::And as u8 }>(manager, rec, f, g, vars, cx),
+        Or => apply_quant::<_, _, Q, { BDDOp::Or as u8 }>(manager, rec, f, g, vars, cx),
+        Xor => apply_quant::<_, _, Q, { BDDOp::Xor as u8 }>(manager, rec, f, g, vars, cx),
+        Equiv => apply_quant::<_, _, Q, { BDDOp::Equiv as u8 }>(manager, rec, f, g, vars, cx),
+        Nand => apply_quant::<_, _, Q, { BDDOp::Nand as u8 }>(manager, rec, f, g, vars, cx),
+        Nor => apply_quant::<_, _, Q, { BDDOp::Nor as u8 }>(manager, rec, f, g, vars, cx),
+        Imp => apply_quant::<_, _, Q, { BDDOp::Imp as u8 }>(manager, rec, f, g, vars, cx),
+        ImpStrict => apply_quant::<_, _, Q, { BDDOp::ImpStrict as u8 }>(manager, rec, f, g, vars, cx),
     }
+}
+
+
+
+fn apply_quant_dispatch_task<'a, M, R, const Q: u8>(
+    cx: &mut R::Context,
+    input: ApplyQuantDispatchInput<'a, M, R>,
+) -> AllocResult<M::Edge>
+where
+    M: Manager<Terminal = BDDTerminal> + HasApplyCache<M, BDDOp>,
+    M::InnerNode: HasLevel,
+    R: Recursor<M>,
+{
+    let (manager, rec, op, lhs, rhs, vars) = input;
+
+    apply_quant_dispatch::<M, R, Q>(
+        manager,
+        rec,
+        op,
+        lhs,
+        rhs,
+        vars,
+        cx,
+    )
 }
 
 // --- Function Interface ------------------------------------------------------
@@ -940,7 +971,7 @@ where
     ) -> AllocResult<EdgeOfFunc<'id, Self>> {
         let rec = SequentialRecursor;
         let subst = substitute_prepare(manager, substitution.pairs())?;
-        substitute(manager, rec, edge.borrowed(), &subst, substitution.id())
+        substitute(manager, rec, edge.borrowed(), &subst, substitution.id(), &mut ())
     }
 }
 
@@ -991,7 +1022,7 @@ where
         manager: &Self::Manager<'id>,
         edge: &EdgeOfFunc<'id, Self>,
     ) -> AllocResult<EdgeOfFunc<'id, Self>> {
-        apply_not(manager, SequentialRecursor, edge.borrowed())
+        apply_not(manager, SequentialRecursor, edge.borrowed(), &mut ())
     }
 
     #[inline]
@@ -1001,7 +1032,7 @@ where
         rhs: &EdgeOfFunc<'id, Self>,
     ) -> AllocResult<EdgeOfFunc<'id, Self>> {
         let rec = SequentialRecursor;
-        apply_bin::<_, _, { BDDOp::And as u8 }>(manager, rec, lhs.borrowed(), rhs.borrowed())
+        apply_bin::<_, _, { BDDOp::And as u8 }>(manager, rec, lhs.borrowed(), rhs.borrowed(), &mut ())
     }
     #[inline]
     fn or_edge<'id>(
@@ -1010,7 +1041,7 @@ where
         rhs: &EdgeOfFunc<'id, Self>,
     ) -> AllocResult<EdgeOfFunc<'id, Self>> {
         let rec = SequentialRecursor;
-        apply_bin::<_, _, { BDDOp::Or as u8 }>(manager, rec, lhs.borrowed(), rhs.borrowed())
+        apply_bin::<_, _, { BDDOp::Or as u8 }>(manager, rec, lhs.borrowed(), rhs.borrowed(), &mut ())
     }
     #[inline]
     fn nand_edge<'id>(
@@ -1019,7 +1050,7 @@ where
         rhs: &EdgeOfFunc<'id, Self>,
     ) -> AllocResult<EdgeOfFunc<'id, Self>> {
         let rec = SequentialRecursor;
-        apply_bin::<_, _, { BDDOp::Nand as u8 }>(manager, rec, lhs.borrowed(), rhs.borrowed())
+        apply_bin::<_, _, { BDDOp::Nand as u8 }>(manager, rec, lhs.borrowed(), rhs.borrowed(), &mut ())
     }
     #[inline]
     fn nor_edge<'id>(
@@ -1028,7 +1059,7 @@ where
         rhs: &EdgeOfFunc<'id, Self>,
     ) -> AllocResult<EdgeOfFunc<'id, Self>> {
         let rec = SequentialRecursor;
-        apply_bin::<_, _, { BDDOp::Nor as u8 }>(manager, rec, lhs.borrowed(), rhs.borrowed())
+        apply_bin::<_, _, { BDDOp::Nor as u8 }>(manager, rec, lhs.borrowed(), rhs.borrowed(), &mut ())
     }
     #[inline]
     fn xor_edge<'id>(
@@ -1037,7 +1068,7 @@ where
         rhs: &EdgeOfFunc<'id, Self>,
     ) -> AllocResult<EdgeOfFunc<'id, Self>> {
         let rec = SequentialRecursor;
-        apply_bin::<_, _, { BDDOp::Xor as u8 }>(manager, rec, lhs.borrowed(), rhs.borrowed())
+        apply_bin::<_, _, { BDDOp::Xor as u8 }>(manager, rec, lhs.borrowed(), rhs.borrowed(), &mut ())
     }
     #[inline]
     fn equiv_edge<'id>(
@@ -1046,7 +1077,7 @@ where
         rhs: &EdgeOfFunc<'id, Self>,
     ) -> AllocResult<EdgeOfFunc<'id, Self>> {
         let rec = SequentialRecursor;
-        apply_bin::<_, _, { BDDOp::Equiv as u8 }>(manager, rec, lhs.borrowed(), rhs.borrowed())
+        apply_bin::<_, _, { BDDOp::Equiv as u8 }>(manager, rec, lhs.borrowed(), rhs.borrowed(), &mut ())
     }
     #[inline]
     fn imp_edge<'id>(
@@ -1055,7 +1086,7 @@ where
         rhs: &EdgeOfFunc<'id, Self>,
     ) -> AllocResult<EdgeOfFunc<'id, Self>> {
         let rec = SequentialRecursor;
-        apply_bin::<_, _, { BDDOp::Imp as u8 }>(manager, rec, lhs.borrowed(), rhs.borrowed())
+        apply_bin::<_, _, { BDDOp::Imp as u8 }>(manager, rec, lhs.borrowed(), rhs.borrowed(), &mut ())
     }
     #[inline]
     fn imp_strict_edge<'id>(
@@ -1064,7 +1095,7 @@ where
         rhs: &EdgeOfFunc<'id, Self>,
     ) -> AllocResult<EdgeOfFunc<'id, Self>> {
         let rec = SequentialRecursor;
-        apply_bin::<_, _, { BDDOp::ImpStrict as u8 }>(manager, rec, lhs.borrowed(), rhs.borrowed())
+        apply_bin::<_, _, { BDDOp::ImpStrict as u8 }>(manager, rec, lhs.borrowed(), rhs.borrowed(), &mut ())
     }
 
     #[inline]
@@ -1080,6 +1111,7 @@ where
             if_edge.borrowed(),
             then_edge.borrowed(),
             else_edge.borrowed(),
+            &mut (),
         )
     }
 
@@ -1328,7 +1360,7 @@ where
         vars: &EdgeOfFunc<'id, Self>,
     ) -> AllocResult<EdgeOfFunc<'id, Self>> {
         let rec = SequentialRecursor;
-        restrict(manager, rec, root.borrowed(), vars.borrowed())
+        restrict(manager, rec, root.borrowed(), vars.borrowed(), &mut ())
     }
 
     #[inline]
@@ -1338,7 +1370,7 @@ where
         vars: &EdgeOfFunc<'id, Self>,
     ) -> AllocResult<EdgeOfFunc<'id, Self>> {
         let rec = SequentialRecursor;
-        quant::<_, _, { BDDOp::And as u8 }>(manager, rec, root.borrowed(), vars.borrowed())
+        quant::<_, _, { BDDOp::And as u8 }>(manager, rec, root.borrowed(), vars.borrowed(), &mut ())
     }
     #[inline]
     fn exists_edge<'id>(
@@ -1347,7 +1379,7 @@ where
         vars: &EdgeOfFunc<'id, Self>,
     ) -> AllocResult<EdgeOfFunc<'id, Self>> {
         let rec = SequentialRecursor;
-        quant::<_, _, { BDDOp::Or as u8 }>(manager, rec, root.borrowed(), vars.borrowed())
+        quant::<_, _, { BDDOp::Or as u8 }>(manager, rec, root.borrowed(), vars.borrowed(), &mut ())
     }
     #[inline]
     fn unique_edge<'id>(
@@ -1356,7 +1388,7 @@ where
         vars: &EdgeOfFunc<'id, Self>,
     ) -> AllocResult<EdgeOfFunc<'id, Self>> {
         let rec = SequentialRecursor;
-        quant::<_, _, { BDDOp::Xor as u8 }>(manager, rec, root.borrowed(), vars.borrowed())
+        quant::<_, _, { BDDOp::Xor as u8 }>(manager, rec, root.borrowed(), vars.borrowed(), &mut ())
     }
 
     #[inline]
@@ -1369,7 +1401,7 @@ where
     ) -> AllocResult<EdgeOfFunc<'id, Self>> {
         let rec = SequentialRecursor;
         let (lhs, rhs, vars) = (lhs.borrowed(), rhs.borrowed(), vars.borrowed());
-        apply_quant_dispatch::<_, _, { BDDOp::And as u8 }>(manager, rec, op, lhs, rhs, vars)
+        apply_quant_dispatch::<_, _, { BDDOp::And as u8 }>(manager, rec, op, lhs, rhs, vars, &mut ())
     }
     #[inline]
     fn apply_exists_edge<'id>(
@@ -1381,7 +1413,7 @@ where
     ) -> AllocResult<EdgeOfFunc<'id, Self>> {
         let rec = SequentialRecursor;
         let (lhs, rhs, vars) = (lhs.borrowed(), rhs.borrowed(), vars.borrowed());
-        apply_quant_dispatch::<_, _, { BDDOp::Or as u8 }>(manager, rec, op, lhs, rhs, vars)
+        apply_quant_dispatch::<_, _, { BDDOp::Or as u8 }>(manager, rec, op, lhs, rhs, vars, &mut ())
     }
     #[inline]
     fn apply_unique_edge<'id>(
@@ -1393,7 +1425,7 @@ where
     ) -> AllocResult<EdgeOfFunc<'id, Self>> {
         let rec = SequentialRecursor;
         let (lhs, rhs, vars) = (lhs.borrowed(), rhs.borrowed(), vars.borrowed());
-        apply_quant_dispatch::<_, _, { BDDOp::Xor as u8 }>(manager, rec, op, lhs, rhs, vars)
+        apply_quant_dispatch::<_, _, { BDDOp::Xor as u8 }>(manager, rec, op, lhs, rhs, vars, &mut ())
     }
 }
 
@@ -1401,7 +1433,7 @@ impl<F: Function, T: Tag> DotStyle<T> for BDDFunction<F> {}
 
 #[cfg(feature = "multi-threading")]
 pub mod mt {
-    use oxidd_core::HasWorkers;
+    use oxidd_core::{HasWorkers, WorkerPool};
 
     use crate::recursor::mt::ParallelRecursor;
 
@@ -1450,7 +1482,16 @@ pub mod mt {
             let cache_id = substitution.id();
             let edge = edge.borrowed();
             let rec = ParallelRecursor::new(manager);
-            substitute(manager, rec, edge.borrowed(), &subst, cache_id)
+            manager.workers().install(
+                substitute_task::<<F as Function>::Manager<'id>, ParallelRecursor>,
+                (
+                    manager,
+                    rec,
+                    edge.borrowed(),
+                    subst.as_slice(),
+                    cache_id,
+                ),
+            )
         }
     }
 
@@ -1491,8 +1532,15 @@ pub mod mt {
             manager: &Self::Manager<'id>,
             edge: &EdgeOfFunc<'id, Self>,
         ) -> AllocResult<EdgeOfFunc<'id, Self>> {
-            let edge = edge.borrowed();
-            apply_not(manager, ParallelRecursor::new(manager), edge)
+            let rec = ParallelRecursor::new(manager);
+            manager.workers().install(
+                apply_not_task::<<F as Function>::Manager<'id>, ParallelRecursor>,
+                (
+                    manager,
+                    rec,
+                    edge.borrowed(),
+                ),
+            )
         }
 
         #[inline]
@@ -1501,23 +1549,16 @@ pub mod mt {
             lhs: &EdgeOfFunc<'id, Self>,
             rhs: &EdgeOfFunc<'id, Self>,
         ) -> AllocResult<EdgeOfFunc<'id, Self>> {
-            let (lhs, rhs) = (lhs.borrowed(), rhs.borrowed());
-            #[cfg(not(feature = "lace"))]
-            {
-                let rec = ParallelRecursor::new(manager);
-                apply_bin::<_, _, { BDDOp::And as u8 }>(manager, rec, lhs, rhs)
-            }
-            #[cfg(feature = "lace")]
-            {
-                use oxidd_core::WorkerPool as _;
-
-                let threads = manager.workers().current_num_threads();
-                let op = apply_bin_task::<_, { BDDOp::And as u8 }>;
-
-                crate::lace_runtime::with_lace(threads, |lace| {
-                    lace::lace_run!(lace, op(manager, lhs, rhs))
-                })
-            }
+            let rec = ParallelRecursor::new(manager);
+            manager.workers().install(
+                apply_bin_task::<<F as Function>::Manager<'id>, ParallelRecursor, { BDDOp::And as u8 }>,
+                (
+                    manager,
+                    rec,
+                    lhs.borrowed(),
+                    rhs.borrowed(),
+                ),
+            )
         }
 
         #[inline]
@@ -1526,23 +1567,16 @@ pub mod mt {
             lhs: &EdgeOfFunc<'id, Self>,
             rhs: &EdgeOfFunc<'id, Self>,
         ) -> AllocResult<EdgeOfFunc<'id, Self>> {
-            let (lhs, rhs) = (lhs.borrowed(), rhs.borrowed());
-            #[cfg(not(feature = "lace"))]
-            {
-                let rec = ParallelRecursor::new(manager);
-                apply_bin::<_, _, { BDDOp::Or as u8 }>(manager, rec, lhs, rhs)
-            }
-            #[cfg(feature = "lace")]
-            {
-                use oxidd_core::WorkerPool as _;
-
-                let threads = manager.workers().current_num_threads();
-                let op = apply_bin_task::<_, { BDDOp::Or as u8 }>;
-
-                crate::lace_runtime::with_lace(threads, |lace| {
-                    lace::lace_run!(lace, op(manager, lhs, rhs))
-                })
-            }
+            let rec = ParallelRecursor::new(manager);
+            manager.workers().install(
+                apply_bin_task::<<F as Function>::Manager<'id>, ParallelRecursor, { BDDOp::Or as u8 }>,
+                (
+                    manager,
+                    rec,
+                    lhs.borrowed(),
+                    rhs.borrowed(),
+                ),
+            )
         }
         #[inline]
         fn nand_edge<'id>(
@@ -1550,9 +1584,16 @@ pub mod mt {
             lhs: &EdgeOfFunc<'id, Self>,
             rhs: &EdgeOfFunc<'id, Self>,
         ) -> AllocResult<EdgeOfFunc<'id, Self>> {
-            let (lhs, rhs) = (lhs.borrowed(), rhs.borrowed());
             let rec = ParallelRecursor::new(manager);
-            apply_bin::<_, _, { BDDOp::Nand as u8 }>(manager, rec, lhs, rhs)
+            manager.workers().install(
+                apply_bin_task::<<F as Function>::Manager<'id>, ParallelRecursor, { BDDOp::Nand as u8 }>,
+                (
+                    manager,
+                    rec,
+                    lhs.borrowed(),
+                    rhs.borrowed(),
+                ),
+            )
         }
         #[inline]
         fn nor_edge<'id>(
@@ -1560,9 +1601,16 @@ pub mod mt {
             lhs: &EdgeOfFunc<'id, Self>,
             rhs: &EdgeOfFunc<'id, Self>,
         ) -> AllocResult<EdgeOfFunc<'id, Self>> {
-            let (lhs, rhs) = (lhs.borrowed(), rhs.borrowed());
             let rec = ParallelRecursor::new(manager);
-            apply_bin::<_, _, { BDDOp::Nor as u8 }>(manager, rec, lhs, rhs)
+            manager.workers().install(
+                apply_bin_task::<<F as Function>::Manager<'id>, ParallelRecursor, { BDDOp::Nor as u8 }>,
+                (
+                    manager,
+                    rec,
+                    lhs.borrowed(),
+                    rhs.borrowed(),
+                ),
+            )
         }
         #[inline]
         fn xor_edge<'id>(
@@ -1570,9 +1618,16 @@ pub mod mt {
             lhs: &EdgeOfFunc<'id, Self>,
             rhs: &EdgeOfFunc<'id, Self>,
         ) -> AllocResult<EdgeOfFunc<'id, Self>> {
-            let (lhs, rhs) = (lhs.borrowed(), rhs.borrowed());
             let rec = ParallelRecursor::new(manager);
-            apply_bin::<_, _, { BDDOp::Xor as u8 }>(manager, rec, lhs, rhs)
+            manager.workers().install(
+                apply_bin_task::<<F as Function>::Manager<'id>, ParallelRecursor, { BDDOp::Xor as u8 }>,
+                (
+                    manager,
+                    rec,
+                    lhs.borrowed(),
+                    rhs.borrowed(),
+                ),
+            )
         }
         #[inline]
         fn equiv_edge<'id>(
@@ -1580,9 +1635,16 @@ pub mod mt {
             lhs: &EdgeOfFunc<'id, Self>,
             rhs: &EdgeOfFunc<'id, Self>,
         ) -> AllocResult<EdgeOfFunc<'id, Self>> {
-            let (lhs, rhs) = (lhs.borrowed(), rhs.borrowed());
             let rec = ParallelRecursor::new(manager);
-            apply_bin::<_, _, { BDDOp::Equiv as u8 }>(manager, rec, lhs, rhs)
+            manager.workers().install(
+                apply_bin_task::<<F as Function>::Manager<'id>, ParallelRecursor, { BDDOp::Equiv as u8 }>,
+                (
+                    manager,
+                    rec,
+                    lhs.borrowed(),
+                    rhs.borrowed(),
+                ),
+            )
         }
         #[inline]
         fn imp_edge<'id>(
@@ -1590,9 +1652,16 @@ pub mod mt {
             lhs: &EdgeOfFunc<'id, Self>,
             rhs: &EdgeOfFunc<'id, Self>,
         ) -> AllocResult<EdgeOfFunc<'id, Self>> {
-            let (lhs, rhs) = (lhs.borrowed(), rhs.borrowed());
             let rec = ParallelRecursor::new(manager);
-            apply_bin::<_, _, { BDDOp::Imp as u8 }>(manager, rec, lhs, rhs)
+            manager.workers().install(
+                apply_bin_task::<<F as Function>::Manager<'id>, ParallelRecursor, { BDDOp::Imp as u8 }>,
+                (
+                    manager,
+                    rec,
+                    lhs.borrowed(),
+                    rhs.borrowed(),
+                ),
+            )
         }
         #[inline]
         fn imp_strict_edge<'id>(
@@ -1600,9 +1669,16 @@ pub mod mt {
             lhs: &EdgeOfFunc<'id, Self>,
             rhs: &EdgeOfFunc<'id, Self>,
         ) -> AllocResult<EdgeOfFunc<'id, Self>> {
-            let (lhs, rhs) = (lhs.borrowed(), rhs.borrowed());
             let rec = ParallelRecursor::new(manager);
-            apply_bin::<_, _, { BDDOp::ImpStrict as u8 }>(manager, rec, lhs, rhs)
+            manager.workers().install(
+                apply_bin_task::<<F as Function>::Manager<'id>, ParallelRecursor, { BDDOp::ImpStrict as u8 }>,
+                (
+                    manager,
+                    rec,
+                    lhs.borrowed(),
+                    rhs.borrowed(),
+                ),
+            )
         }
 
         #[inline]
@@ -1612,8 +1688,17 @@ pub mod mt {
             g: &EdgeOfFunc<'id, Self>,
             h: &EdgeOfFunc<'id, Self>,
         ) -> AllocResult<EdgeOfFunc<'id, Self>> {
-            let (f, g, h) = (f.borrowed(), g.borrowed(), h.borrowed());
-            apply_ite(manager, ParallelRecursor::new(manager), f, g, h)
+            let rec = ParallelRecursor::new(manager);
+            manager.workers().install(
+                apply_ite_task::<<F as Function>::Manager<'id>, ParallelRecursor>,
+                (
+                    manager,
+                    rec,
+                    f.borrowed(),
+                    g.borrowed(),
+                    h.borrowed(),
+                ),
+            )
         }
 
         #[inline]
@@ -1674,8 +1759,16 @@ pub mod mt {
             root: &EdgeOfFunc<'id, Self>,
             vars: &EdgeOfFunc<'id, Self>,
         ) -> AllocResult<EdgeOfFunc<'id, Self>> {
-            let (root, vars) = (root.borrowed(), vars.borrowed());
-            restrict(manager, ParallelRecursor::new(manager), root, vars)
+            let rec = ParallelRecursor::new(manager);
+            manager.workers().install(
+                restrict_task::<<F as Function>::Manager<'id>, ParallelRecursor>,
+                (
+                    manager,
+                    rec,
+                    root.borrowed(),
+                    vars.borrowed(),
+                ),
+            )
         }
 
         #[inline]
@@ -1684,9 +1777,16 @@ pub mod mt {
             root: &EdgeOfFunc<'id, Self>,
             vars: &EdgeOfFunc<'id, Self>,
         ) -> AllocResult<EdgeOfFunc<'id, Self>> {
-            let (root, vars) = (root.borrowed(), vars.borrowed());
             let rec = ParallelRecursor::new(manager);
-            quant::<_, _, { BDDOp::And as u8 }>(manager, rec, root, vars)
+            manager.workers().install(
+                quant_task::<<F as Function>::Manager<'id>, ParallelRecursor, { BDDOp::And as u8 }>,
+                (
+                    manager,
+                    rec,
+                    root.borrowed(),
+                    vars.borrowed(),
+                ),
+            )
         }
         #[inline]
         fn exists_edge<'id>(
@@ -1694,9 +1794,16 @@ pub mod mt {
             root: &EdgeOfFunc<'id, Self>,
             vars: &EdgeOfFunc<'id, Self>,
         ) -> AllocResult<EdgeOfFunc<'id, Self>> {
-            let (root, vars) = (root.borrowed(), vars.borrowed());
             let rec = ParallelRecursor::new(manager);
-            quant::<_, _, { BDDOp::Or as u8 }>(manager, rec, root, vars)
+            manager.workers().install(
+                quant_task::<<F as Function>::Manager<'id>, ParallelRecursor, { BDDOp::Or as u8 }>,
+                (
+                    manager,
+                    rec,
+                    root.borrowed(),
+                    vars.borrowed(),
+                ),
+            )
         }
         #[inline]
         fn unique_edge<'id>(
@@ -1704,9 +1811,16 @@ pub mod mt {
             root: &EdgeOfFunc<'id, Self>,
             vars: &EdgeOfFunc<'id, Self>,
         ) -> AllocResult<EdgeOfFunc<'id, Self>> {
-            let (root, vars) = (root.borrowed(), vars.borrowed());
             let rec = ParallelRecursor::new(manager);
-            quant::<_, _, { BDDOp::Xor as u8 }>(manager, rec, root, vars)
+            manager.workers().install(
+                quant_task::<<F as Function>::Manager<'id>, ParallelRecursor, { BDDOp::Xor as u8 }>,
+                (
+                    manager,
+                    rec,
+                    root.borrowed(),
+                    vars.borrowed(),
+                ),
+            )
         }
 
         #[inline]
@@ -1717,9 +1831,23 @@ pub mod mt {
             rhs: &EdgeOfFunc<'id, Self>,
             vars: &EdgeOfFunc<'id, Self>,
         ) -> AllocResult<EdgeOfFunc<'id, Self>> {
-            let (lhs, rhs, vars) = (lhs.borrowed(), rhs.borrowed(), vars.borrowed());
             let rec = ParallelRecursor::new(manager);
-            apply_quant_dispatch::<_, _, { BDDOp::And as u8 }>(manager, rec, op, lhs, rhs, vars)
+
+            manager.workers().install(
+                apply_quant_dispatch_task::<
+                    <F as Function>::Manager<'id>,
+                    ParallelRecursor,
+                    { BDDOp::And as u8 },
+                >,
+                (
+                    manager,
+                    rec,
+                    op,
+                    lhs.borrowed(),
+                    rhs.borrowed(),
+                    vars.borrowed(),
+                ),
+            )
         }
         #[inline]
         fn apply_exists_edge<'id>(
@@ -1729,9 +1857,23 @@ pub mod mt {
             rhs: &EdgeOfFunc<'id, Self>,
             vars: &EdgeOfFunc<'id, Self>,
         ) -> AllocResult<EdgeOfFunc<'id, Self>> {
-            let (lhs, rhs, vars) = (lhs.borrowed(), rhs.borrowed(), vars.borrowed());
             let rec = ParallelRecursor::new(manager);
-            apply_quant_dispatch::<_, _, { BDDOp::Or as u8 }>(manager, rec, op, lhs, rhs, vars)
+
+            manager.workers().install(
+                apply_quant_dispatch_task::<
+                    <F as Function>::Manager<'id>,
+                    ParallelRecursor,
+                    { BDDOp::Or as u8 },
+                >,
+                (
+                    manager,
+                    rec,
+                    op,
+                    lhs.borrowed(),
+                    rhs.borrowed(),
+                    vars.borrowed(),
+                ),
+            )
         }
         #[inline]
         fn apply_unique_edge<'id>(
@@ -1741,9 +1883,23 @@ pub mod mt {
             rhs: &EdgeOfFunc<'id, Self>,
             vars: &EdgeOfFunc<'id, Self>,
         ) -> AllocResult<EdgeOfFunc<'id, Self>> {
-            let (lhs, rhs, vars) = (lhs.borrowed(), rhs.borrowed(), vars.borrowed());
             let rec = ParallelRecursor::new(manager);
-            apply_quant_dispatch::<_, _, { BDDOp::Xor as u8 }>(manager, rec, op, lhs, rhs, vars)
+
+            manager.workers().install(
+                apply_quant_dispatch_task::<
+                    <F as Function>::Manager<'id>,
+                    ParallelRecursor,
+                    { BDDOp::Xor as u8 },
+                >,
+                (
+                    manager,
+                    rec,
+                    op,
+                    lhs.borrowed(),
+                    rhs.borrowed(),
+                    vars.borrowed(),
+                ),
+            )
         }
     }
 

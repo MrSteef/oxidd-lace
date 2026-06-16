@@ -2287,10 +2287,14 @@ pub fn new_manager<
     manager.store = Arc::as_ptr(&arc);
     drop(manager);
 
-    #[cfg(not(feature = "lace"))]
+    // TODO add support again for Lace
+    // not having this causes non-deterministic garbage collection
+    // leading to incorrect results
+    // #[cfg(not(feature = "lace"))]
     let store_addr = addr(&*arc);
-    #[cfg(not(feature = "lace"))]
-    arc.workers.pool.spawn_broadcast(move |_| {
+    // #[cfg(not(feature = "lace"))]
+    // arc.workers.pool.spawn_broadcast(move |_| {
+    oxidd_core::WorkerPool::broadcast(&arc.workers, move |_| {
         // The workers are dedicated to this store.
         LOCAL_STORE_STATE.with(|state| state.current_store.set(store_addr))
     });
@@ -2301,7 +2305,7 @@ pub fn new_manager<
         .name("oxidd mi gc".to_string())
         .spawn(move || {
             // The worker is dedicated to this store.
-            #[cfg(not(feature = "lace"))]
+            // #[cfg(not(feature = "lace"))]
             {
                 LOCAL_STORE_STATE.with(|state| state.current_store.set(store_addr));
             }

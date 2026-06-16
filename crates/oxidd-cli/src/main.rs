@@ -635,11 +635,10 @@ fn main() {
         DDType::BDD => {
             let mref =
                 oxidd::bdd::new_manager(inner_node_capacity, cli.apply_cache_capacity, cli.threads);
-            // Run all operations from within the worker pool to reduce the number of
-            // context switches
+
             mref.clone()
                 .workers()
-                .install(move || bool_dd_main::<oxidd::bdd::BDDFunction, _>(&cli, mref))
+                .install(bdd_main_task, (&cli, mref))
         }
         DDType::BCDD => {
             let mref = oxidd::bcdd::new_manager(
@@ -649,7 +648,7 @@ fn main() {
             );
             mref.clone()
                 .workers()
-                .install(move || bool_dd_main::<oxidd::bcdd::BCDDFunction, _>(&cli, mref))
+                .install(bcdd_main_task, (&cli, mref))
         }
         DDType::ZBDD => {
             let mref = oxidd::zbdd::new_manager(
@@ -659,7 +658,40 @@ fn main() {
             );
             mref.clone()
                 .workers()
-                .install(move || bool_dd_main::<oxidd::zbdd::ZBDDFunction, _>(&cli, mref))
+                .install(zbdd_main_task, (&cli, mref))
         }
     }
+}
+
+fn bdd_main_task<C>(
+    _cx: &mut C,
+    input: (
+        &Cli,
+        <oxidd::bdd::BDDFunction as oxidd::Function>::ManagerRef,
+    ),
+) {
+    let (cli, manager) = input;
+    bool_dd_main::<oxidd::bdd::BDDFunction, _>(cli, manager)
+}
+
+fn bcdd_main_task<C>(
+    _cx: &mut C,
+    input: (
+        &Cli,
+        <oxidd::bcdd::BCDDFunction as oxidd::Function>::ManagerRef,
+    ),
+) {
+    let (cli, manager) = input;
+    bool_dd_main::<oxidd::bcdd::BCDDFunction, _>(cli, manager)
+}
+
+fn zbdd_main_task<C>(
+    _cx: &mut C,
+    input: (
+        &Cli,
+        <oxidd::zbdd::ZBDDFunction as oxidd::Function>::ManagerRef,
+    ),
+) {
+    let (cli, manager) = input;
+    bool_dd_main::<oxidd::zbdd::ZBDDFunction, _>(cli, manager)
 }

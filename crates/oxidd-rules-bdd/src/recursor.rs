@@ -1,63 +1,113 @@
 use oxidd_core::Manager;
 use oxidd_core::util::{AllocResult, Borrowed, EdgeDropGuard};
 
-type UnaryOp<M, R> = fn(&M, R, Borrowed<<M as Manager>::Edge>) -> AllocResult<<M as Manager>::Edge>;
+pub type UnaryInput<'a, M, R> = (&'a M, R, Borrowed<'a, <M as Manager>::Edge>);
 
-type BinaryOp<M, R> = fn(
-    &M,
-    R,
-    Borrowed<<M as Manager>::Edge>,
-    Borrowed<<M as Manager>::Edge>,
-) -> AllocResult<<M as Manager>::Edge>;
+pub type UnaryOp<'a, M, R> = oxidd_core::WorkerTask<
+    <R as Recursor<M>>::Context,
+    UnaryInput<'a, M, R>,
+    AllocResult<<M as Manager>::Edge>,
+>;
 
-type TernaryOp<M, R> = fn(
-    &M,
+pub type BinaryInput<'a, M, R> = (
+    &'a M,
     R,
-    Borrowed<<M as Manager>::Edge>,
-    Borrowed<<M as Manager>::Edge>,
-    Borrowed<<M as Manager>::Edge>,
-) -> AllocResult<<M as Manager>::Edge>;
+    Borrowed<'a, <M as Manager>::Edge>,
+    Borrowed<'a, <M as Manager>::Edge>,
+);
 
-type SubstOp<M, R> = fn(
-    &M,
+pub type BinaryOp<'a, M, R> = oxidd_core::WorkerTask<
+    <R as Recursor<M>>::Context,
+    BinaryInput<'a, M, R>,
+    AllocResult<<M as Manager>::Edge>,
+>;
+
+pub type TernaryInput<'a, M, R> = (
+    &'a M,
     R,
-    Borrowed<<M as Manager>::Edge>,
-    &[<M as Manager>::Edge],
+    Borrowed<'a, <M as Manager>::Edge>,
+    Borrowed<'a, <M as Manager>::Edge>,
+    Borrowed<'a, <M as Manager>::Edge>,
+);
+
+pub type TernaryOp<'a, M, R> = oxidd_core::WorkerTask<
+    <R as Recursor<M>>::Context,
+    TernaryInput<'a, M, R>,
+    AllocResult<<M as Manager>::Edge>,
+>;
+
+pub type SubstInput<'a, M, R> = (
+    &'a M,
+    R,
+    Borrowed<'a, <M as Manager>::Edge>,
+    &'a [<M as Manager>::Edge],
     u32,
-) -> AllocResult<<M as Manager>::Edge>;
+);
 
-pub trait Recursor<M: Manager>: Copy {
+pub type SubstOp<'a, M, R> = oxidd_core::WorkerTask<
+    <R as Recursor<M>>::Context,
+    SubstInput<'a, M, R>,
+    AllocResult<<M as Manager>::Edge>,
+>;
+
+pub type ApplyQuantDispatchInput<'a, M, R> = (
+    &'a M,
+    R,
+    oxidd_core::function::BooleanOperator,
+    Borrowed<'a, <M as Manager>::Edge>,
+    Borrowed<'a, <M as Manager>::Edge>,
+    Borrowed<'a, <M as Manager>::Edge>,
+);
+
+pub trait Recursor<M>: Copy
+where
+    M: Manager,
+{
+    type Context;
+
     fn unary<'a>(
         self,
-        op: UnaryOp<M, Self>,
+        op: UnaryOp<'a, M, Self>,
         manager: &'a M,
-        a: Borrowed<M::Edge>,
-        b: Borrowed<M::Edge>,
+        a: Borrowed<'a, M::Edge>,
+        b: Borrowed<'a, M::Edge>,
+        cx: &mut Self::Context,
     ) -> AllocResult<(EdgeDropGuard<'a, M>, EdgeDropGuard<'a, M>)>;
 
     fn binary<'a>(
         self,
-        op: BinaryOp<M, Self>,
+        op: BinaryOp<'a, M, Self>,
         manager: &'a M,
-        a: (Borrowed<M::Edge>, Borrowed<M::Edge>),
-        b: (Borrowed<M::Edge>, Borrowed<M::Edge>),
+        a: (Borrowed<'a, M::Edge>, Borrowed<'a, M::Edge>),
+        b: (Borrowed<'a, M::Edge>, Borrowed<'a, M::Edge>),
+        cx: &mut Self::Context,
     ) -> AllocResult<(EdgeDropGuard<'a, M>, EdgeDropGuard<'a, M>)>;
 
     #[allow(clippy::type_complexity)]
     fn ternary<'a>(
         self,
-        op: TernaryOp<M, Self>,
+        op: TernaryOp<'a, M, Self>,
         manager: &'a M,
-        a: (Borrowed<M::Edge>, Borrowed<M::Edge>, Borrowed<M::Edge>),
-        b: (Borrowed<M::Edge>, Borrowed<M::Edge>, Borrowed<M::Edge>),
+        a: (
+            Borrowed<'a, M::Edge>,
+            Borrowed<'a, M::Edge>,
+            Borrowed<'a, M::Edge>,
+        ),
+        b: (
+            Borrowed<'a, M::Edge>,
+            Borrowed<'a, M::Edge>,
+            Borrowed<'a, M::Edge>,
+        ),
+        cx: &mut Self::Context,
     ) -> AllocResult<(EdgeDropGuard<'a, M>, EdgeDropGuard<'a, M>)>;
 
     fn subst<'a>(
         self,
-        op: SubstOp<M, Self>,
+        op: SubstOp<'a, M, Self>,
         manager: &'a M,
-        a: (Borrowed<M::Edge>, &[M::Edge], u32),
-        b: (Borrowed<M::Edge>, &[M::Edge], u32),
+        a: (Borrowed<'a, M::Edge>, &'a [M::Edge], u32),
+        b: (Borrowed<'a, M::Edge>, &'a [M::Edge], u32),
+        cx: &mut Self::Context,
     ) -> AllocResult<(EdgeDropGuard<'a, M>, EdgeDropGuard<'a, M>)>;
 
     /// Returns true if the algorithm should switch to a sequential recursor
@@ -73,69 +123,98 @@ pub trait Recursor<M: Manager>: Copy {
 #[derive(Clone, Copy)]
 pub struct SequentialRecursor;
 
-impl<M: Manager> Recursor<M> for SequentialRecursor {
-    #[inline(always)]
+impl<M> Recursor<M> for SequentialRecursor
+where
+    M: Manager,
+{
+    type Context = ();
+
     fn unary<'a>(
         self,
-        op: UnaryOp<M, Self>,
+        op: UnaryOp<'a, M, Self>,
         manager: &'a M,
-        a: Borrowed<M::Edge>,
-        b: Borrowed<M::Edge>,
+        a: Borrowed<'a, M::Edge>,
+        b: Borrowed<'a, M::Edge>,
+        cx: &mut Self::Context,
     ) -> AllocResult<(EdgeDropGuard<'a, M>, EdgeDropGuard<'a, M>)> {
-        let ra = EdgeDropGuard::new(manager, op(manager, self, a)?);
-        let rb = EdgeDropGuard::new(manager, op(manager, self, b)?);
-        Ok((ra, rb))
+        let ra = op(cx, (manager, self, a))?;
+        let rb = op(cx, (manager, self, b))?;
+
+        Ok((
+            EdgeDropGuard::new(manager, ra),
+            EdgeDropGuard::new(manager, rb),
+        ))
     }
 
-    #[inline(always)]
     fn binary<'a>(
         self,
-        op: BinaryOp<M, Self>,
+        op: BinaryOp<'a, M, Self>,
         manager: &'a M,
-        a: (Borrowed<M::Edge>, Borrowed<M::Edge>),
-        b: (Borrowed<M::Edge>, Borrowed<M::Edge>),
+        a: (Borrowed<'a, M::Edge>, Borrowed<'a, M::Edge>),
+        b: (Borrowed<'a, M::Edge>, Borrowed<'a, M::Edge>),
+        cx: &mut Self::Context,
     ) -> AllocResult<(EdgeDropGuard<'a, M>, EdgeDropGuard<'a, M>)> {
-        let ra = EdgeDropGuard::new(manager, op(manager, self, a.0, a.1)?);
-        let rb = EdgeDropGuard::new(manager, op(manager, self, b.0, b.1)?);
-        Ok((ra, rb))
+        let ra = op(cx, (manager, self, a.0, a.1))?;
+        let rb = op(cx, (manager, self, b.0, b.1))?;
+
+        Ok((
+            EdgeDropGuard::new(manager, ra),
+            EdgeDropGuard::new(manager, rb),
+        ))
     }
 
-    #[inline(always)]
     fn ternary<'a>(
         self,
-        op: TernaryOp<M, Self>,
+        op: TernaryOp<'a, M, Self>,
         manager: &'a M,
-        a: (Borrowed<M::Edge>, Borrowed<M::Edge>, Borrowed<M::Edge>),
-        b: (Borrowed<M::Edge>, Borrowed<M::Edge>, Borrowed<M::Edge>),
+        a: (
+            Borrowed<'a, M::Edge>,
+            Borrowed<'a, M::Edge>,
+            Borrowed<'a, M::Edge>,
+        ),
+        b: (
+            Borrowed<'a, M::Edge>,
+            Borrowed<'a, M::Edge>,
+            Borrowed<'a, M::Edge>,
+        ),
+        cx: &mut Self::Context,
     ) -> AllocResult<(EdgeDropGuard<'a, M>, EdgeDropGuard<'a, M>)> {
-        let ra = EdgeDropGuard::new(manager, op(manager, self, a.0, a.1, a.2)?);
-        let rb = EdgeDropGuard::new(manager, op(manager, self, b.0, b.1, b.2)?);
-        Ok((ra, rb))
+        let ra = op(cx, (manager, self, a.0, a.1, a.2))?;
+        let rb = op(cx, (manager, self, b.0, b.1, b.2))?;
+
+        Ok((
+            EdgeDropGuard::new(manager, ra),
+            EdgeDropGuard::new(manager, rb),
+        ))
     }
 
-    #[inline(always)]
     fn subst<'a>(
         self,
-        op: SubstOp<M, Self>,
+        op: SubstOp<'a, M, Self>,
         manager: &'a M,
-        a: (Borrowed<M::Edge>, &[M::Edge], u32),
-        b: (Borrowed<M::Edge>, &[M::Edge], u32),
+        a: (Borrowed<'a, M::Edge>, &'a [M::Edge], u32),
+        b: (Borrowed<'a, M::Edge>, &'a [M::Edge], u32),
+        cx: &mut Self::Context,
     ) -> AllocResult<(EdgeDropGuard<'a, M>, EdgeDropGuard<'a, M>)> {
-        let ra = EdgeDropGuard::new(manager, op(manager, self, a.0, a.1, a.2)?);
-        let rb = EdgeDropGuard::new(manager, op(manager, self, b.0, b.1, a.2)?);
-        Ok((ra, rb))
+        let ra = op(cx, (manager, self, a.0, a.1, a.2))?;
+        let rb = op(cx, (manager, self, b.0, b.1, b.2))?;
+
+        Ok((
+            EdgeDropGuard::new(manager, ra),
+            EdgeDropGuard::new(manager, rb),
+        ))
     }
 
     #[inline(always)]
     fn should_switch_to_sequential(self) -> bool {
-        false // returning true would make the algorithms diverge
+        false
     }
 }
 
-#[cfg(feature = "multi-threading")]
+#[cfg(any(feature = "multi-threading", feature = "lace"))]
 pub mod mt {
     use super::*;
-    use oxidd_core::WorkerPool;
+    use oxidd_core::{HasWorkers, WorkerPool};
 
     #[derive(Clone, Copy)]
     pub struct ParallelRecursor {
@@ -143,7 +222,10 @@ pub mod mt {
     }
 
     impl ParallelRecursor {
-        pub fn new<M: oxidd_core::HasWorkers>(manager: &M) -> Self {
+        pub fn new<M>(manager: &M) -> Self
+        where
+            M: HasWorkers,
+        {
             Self {
                 remaining_depth: manager.workers().split_depth(),
             }
@@ -152,91 +234,110 @@ pub mod mt {
 
     impl<M> Recursor<M> for ParallelRecursor
     where
-        M: Manager + oxidd_core::HasWorkers,
+        M: Manager + HasWorkers,
         M::Edge: Send + Sync,
     {
+        type Context = <<M as HasWorkers>::WorkerPool as WorkerPool>::Context;
+
         fn unary<'a>(
             mut self,
-            op: UnaryOp<M, Self>,
+            op: UnaryOp<'a, M, Self>,
             manager: &'a M,
-            a: Borrowed<M::Edge>,
-            b: Borrowed<M::Edge>,
+            a: Borrowed<'a, M::Edge>,
+            b: Borrowed<'a, M::Edge>,
+            cx: &mut Self::Context,
         ) -> AllocResult<(EdgeDropGuard<'a, M>, EdgeDropGuard<'a, M>)> {
             self.remaining_depth -= 1;
-            let (ra, rb) = manager.workers().join(
-                move || {
-                    let edge = op(manager, self, a)?;
-                    Ok(EdgeDropGuard::new(manager, edge))
-                },
-                move || {
-                    let edge = op(manager, self, b)?;
-                    Ok(EdgeDropGuard::new(manager, edge))
-                },
-            );
-            Ok((ra?, rb?))
+
+            let (ra, rb) =
+                manager
+                    .workers()
+                    .join(cx, op, (manager, self, a), op, (manager, self, b));
+
+            Ok((
+                EdgeDropGuard::new(manager, ra?),
+                EdgeDropGuard::new(manager, rb?),
+            ))
         }
 
         fn binary<'a>(
             mut self,
-            op: BinaryOp<M, Self>,
+            op: BinaryOp<'a, M, Self>,
             manager: &'a M,
-            a: (Borrowed<M::Edge>, Borrowed<M::Edge>),
-            b: (Borrowed<M::Edge>, Borrowed<M::Edge>),
+            a: (Borrowed<'a, M::Edge>, Borrowed<'a, M::Edge>),
+            b: (Borrowed<'a, M::Edge>, Borrowed<'a, M::Edge>),
+            cx: &mut Self::Context,
         ) -> AllocResult<(EdgeDropGuard<'a, M>, EdgeDropGuard<'a, M>)> {
             self.remaining_depth -= 1;
+
             let (ra, rb) = manager.workers().join(
-                move || {
-                    let edge = op(manager, self, a.0, a.1)?;
-                    Ok(EdgeDropGuard::new(manager, edge))
-                },
-                move || {
-                    let edge = op(manager, self, b.0, b.1)?;
-                    Ok(EdgeDropGuard::new(manager, edge))
-                },
+                cx,
+                op,
+                (manager, self, a.0, a.1),
+                op,
+                (manager, self, b.0, b.1),
             );
-            Ok((ra?, rb?))
+
+            Ok((
+                EdgeDropGuard::new(manager, ra?),
+                EdgeDropGuard::new(manager, rb?),
+            ))
         }
 
         fn ternary<'a>(
             mut self,
-            op: TernaryOp<M, Self>,
+            op: TernaryOp<'a, M, Self>,
             manager: &'a M,
-            a: (Borrowed<M::Edge>, Borrowed<M::Edge>, Borrowed<M::Edge>),
-            b: (Borrowed<M::Edge>, Borrowed<M::Edge>, Borrowed<M::Edge>),
+            a: (
+                Borrowed<'a, M::Edge>,
+                Borrowed<'a, M::Edge>,
+                Borrowed<'a, M::Edge>,
+            ),
+            b: (
+                Borrowed<'a, M::Edge>,
+                Borrowed<'a, M::Edge>,
+                Borrowed<'a, M::Edge>,
+            ),
+            cx: &mut Self::Context,
         ) -> AllocResult<(EdgeDropGuard<'a, M>, EdgeDropGuard<'a, M>)> {
             self.remaining_depth -= 1;
+
             let (ra, rb) = manager.workers().join(
-                move || {
-                    let edge = op(manager, self, a.0, a.1, a.2)?;
-                    Ok(EdgeDropGuard::new(manager, edge))
-                },
-                move || {
-                    let edge = op(manager, self, b.0, b.1, b.2)?;
-                    Ok(EdgeDropGuard::new(manager, edge))
-                },
+                cx,
+                op,
+                (manager, self, a.0, a.1, a.2),
+                op,
+                (manager, self, b.0, b.1, b.2),
             );
-            Ok((ra?, rb?))
+
+            Ok((
+                EdgeDropGuard::new(manager, ra?),
+                EdgeDropGuard::new(manager, rb?),
+            ))
         }
 
         fn subst<'a>(
             mut self,
-            op: SubstOp<M, Self>,
+            op: SubstOp<'a, M, Self>,
             manager: &'a M,
-            a: (Borrowed<M::Edge>, &[M::Edge], u32),
-            b: (Borrowed<M::Edge>, &[M::Edge], u32),
+            a: (Borrowed<'a, M::Edge>, &'a [M::Edge], u32),
+            b: (Borrowed<'a, M::Edge>, &'a [M::Edge], u32),
+            cx: &mut Self::Context,
         ) -> AllocResult<(EdgeDropGuard<'a, M>, EdgeDropGuard<'a, M>)> {
             self.remaining_depth -= 1;
+
             let (ra, rb) = manager.workers().join(
-                move || {
-                    let edge = op(manager, self, a.0, a.1, a.2)?;
-                    Ok(EdgeDropGuard::new(manager, edge))
-                },
-                move || {
-                    let edge = op(manager, self, b.0, b.1, b.2)?;
-                    Ok(EdgeDropGuard::new(manager, edge))
-                },
+                cx,
+                op,
+                (manager, self, a.0, a.1, a.2),
+                op,
+                (manager, self, b.0, b.1, b.2),
             );
-            Ok((ra?, rb?))
+
+            Ok((
+                EdgeDropGuard::new(manager, ra?),
+                EdgeDropGuard::new(manager, rb?),
+            ))
         }
 
         #[inline(always)]

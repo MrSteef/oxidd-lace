@@ -10,6 +10,8 @@ pub mod edge;
 pub struct Workers;
 
 impl WorkerPool for Workers {
+    type Context = ();
+
     fn current_num_threads(&self) -> usize {
         rayon::current_num_threads()
     }
@@ -20,16 +22,43 @@ impl WorkerPool for Workers {
 
     fn set_split_depth(&self, _depth: Option<u32>) {}
 
-    fn install<R: Send>(&self, op: impl FnOnce() -> R + Send) -> R {
-        op()
+    fn install<I, O>(
+        &self,
+        task: oxidd_core::WorkerTask<(), I, O>,
+        input: I,
+    ) -> O
+    where
+        I: Send,
+        O: Send,
+    {
+        let mut cx = ();
+        task(&mut cx, input)
     }
 
-    fn join<RA: Send, RB: Send>(
+    fn join<IA, IB, OA, OB>(
         &self,
-        op_a: impl FnOnce() -> RA + Send,
-        op_b: impl FnOnce() -> RB + Send,
-    ) -> (RA, RB) {
-        rayon::join(op_a, op_b)
+        _cx: &mut (),
+        task_a: oxidd_core::WorkerTask<(), IA, OA>,
+        input_a: IA,
+        task_b: oxidd_core::WorkerTask<(), IB, OB>,
+        input_b: IB,
+    ) -> (OA, OB)
+    where
+        IA: Send,
+        IB: Send,
+        OA: Send,
+        OB: Send,
+    {
+        rayon::join(
+            move || {
+                let mut cx = ();
+                task_a(&mut cx, input_a)
+            },
+            move || {
+                let mut cx = ();
+                task_b(&mut cx, input_b)
+            },
+        )
     }
 
     fn broadcast<R: Send>(&self, op: impl Fn(oxidd_core::BroadcastContext) -> R + Sync) -> Vec<R> {

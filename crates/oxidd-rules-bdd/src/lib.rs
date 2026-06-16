@@ -21,9 +21,6 @@ use oxidd_core::Manager;
 
 mod recursor;
 
-#[cfg(feature = "lace")]
-pub(crate) mod lace_runtime;
-
 #[cfg(feature = "complement-edge")]
 pub mod complement_edge;
 #[cfg(feature = "simple")]

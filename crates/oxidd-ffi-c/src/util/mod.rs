@@ -384,11 +384,28 @@ pub fn run_in_worker_pool<M: oxidd::HasWorkers>(
     // that pointer for memory accesses may cause data races
     unsafe impl Send for SendPtr {}
 
-    let data = SendPtr(data);
-    oxidd::WorkerPool::install(oxidd::HasWorkers::workers(manager), move || {
-        let data: SendPtr = data;
-        SendPtr(callback(data.0))
-    })
+    struct RunInWorkerPoolInput {
+        callback: extern "C" fn(*mut std::ffi::c_void) -> *mut std::ffi::c_void,
+        data: SendPtr,
+    }
+
+    fn run_in_worker_pool_task<C>(
+        _cx: &mut C,
+        input: RunInWorkerPoolInput,
+    ) -> SendPtr {
+        SendPtr((input.callback)(input.data.0))
+    }
+
+    oxidd::WorkerPool::install(
+        oxidd::HasWorkers::workers(manager),
+        run_in_worker_pool_task::<
+            <<M as oxidd::HasWorkers>::WorkerPool as oxidd::WorkerPool>::Context,
+        >,
+        RunInWorkerPoolInput {
+            callback,
+            data: SendPtr(data),
+        },
+    )
     .0
 }
 
