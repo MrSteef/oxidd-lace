@@ -84,6 +84,7 @@ multi-threading = [
 lace = [
     "oxidd-rules-bdd?/lace",
     "oxidd-manager-index?/lace",
+    "oxidd-manager-pointer?/lace",
 ]
 
 ## Use the index-based manager implementation

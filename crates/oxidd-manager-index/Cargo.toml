@@ -31,12 +31,12 @@ fixedbitset = "0.5.7"
 
 # thread pool
 rayon = "1.10"
-lace = {path = "../../../lace-for-oxidd/lace", optional = true }
+lace = { git = "https://github.com/MrSteef/lace-for-oxidd", optional = true }
 
 # `CachePadded`
 crossbeam-utils = { version = "0.8", default-features = false }
 
-# standard derive macros but with custom bounds on generics
+# standard deriveoxidd/crates/oxidd-manager-index/src macros but with custom bounds on generics
 derive-where = "1.5"
 
 # run actions when unwinding

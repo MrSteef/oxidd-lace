@@ -33,6 +33,7 @@ fixedbitset = "0.5.7"
 
 # thread pool
 rayon = "1.10"
+lace = { git = "https://github.com/MrSteef/lace-for-oxidd", optional = true }
 
 # standard derive macros but with custom bounds on generics
 derive-where = "1.5"
@@ -49,3 +50,6 @@ default = []
 ## `Drop` implementation. So if the check fails, there will be a weird linker
 ## error. Using this feature in unoptimized builds may cause false positives.
 static_leak_check = []
+
+## Lace parallelism instead of rayon
+lace = ["dep:lace"]
