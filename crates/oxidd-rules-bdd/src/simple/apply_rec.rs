@@ -80,6 +80,7 @@ where
 /// Task-shaped wrapper for recursively applying the 'not' operator.
 ///
 /// This is what gets passed to `Recursor::unary`.
+#[inline]
 fn apply_not_task<'a, M, R>(
     cx: &mut R::Context,
     input: UnaryInput<'a, M, R>,
@@ -165,6 +166,7 @@ where
 /// Task-shaped wrapper for recursively applying a binary operator.
 ///
 /// This is what gets passed to `Recursor::unary`.
+#[inline]
 fn apply_bin_task<'a, M, R, const OP: u8>(
     cx: &mut R::Context,
     input: BinaryInput<'a, M, R>,
@@ -284,6 +286,7 @@ where
 /// Task-shaped wrapper for recursively applying a binary operator.
 ///
 /// This is what gets passed to `Recursor::unary`.
+#[inline]
 fn apply_ite_task<'a, M, R>(
     cx: &mut R::Context,
     input: TernaryInput<'a, M, R>,
@@ -414,6 +417,7 @@ where
     Ok(res)
 }
 
+#[inline]
 fn substitute_task<'a, M, R>(
     cx: &mut R::Context,
     input: SubstInput<'a, M, R>,
@@ -589,6 +593,7 @@ where
     }
 }
 
+#[inline]
 fn restrict_task<'a, M, R>(
     cx: &mut R::Context,
     input: BinaryInput<'a, M, R>,
@@ -708,6 +713,7 @@ where
     Ok(res)
 }
 
+#[inline]
 fn quant_task<'a, M, R, const Q: u8>(
     cx: &mut R::Context,
     input: BinaryInput<'a, M, R>,
@@ -862,6 +868,7 @@ where
     Ok(res)
 }
 
+#[inline]
 fn apply_quant_task<'a, M, R, const Q: u8, const OP: u8>(
     cx: &mut R::Context,
     input: TernaryInput<'a, M, R>,
@@ -908,6 +915,7 @@ where
 
 
 
+#[inline]
 fn apply_quant_dispatch_task<'a, M, R, const Q: u8>(
     cx: &mut R::Context,
     input: ApplyQuantDispatchInput<'a, M, R>,

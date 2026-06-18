@@ -397,6 +397,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 [[package]]
 name = "lace"
 version = "0.1.0"
+source = "git+https://github.com/MrSteef/lace-for-oxidd#b99ef5066f007a635d81349dda4968a722b35665"
 dependencies = [
  "cc",
  "crossbeam-utils",
@@ -406,6 +407,7 @@ dependencies = [
 [[package]]
 name = "lace-macros"
 version = "0.1.0"
+source = "git+https://github.com/MrSteef/lace-for-oxidd#b99ef5066f007a635d81349dda4968a722b35665"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -680,6 +682,7 @@ dependencies = [
  "arcslab",
  "derive-where",
  "fixedbitset",
+ "lace",
  "linear-hashtbl",
  "oxidd-core",
  "parking_lot",
