@@ -47,7 +47,7 @@ impl Workers {
         let split_depth = std::env::var("OXIDD_SPLIT_DEPTH")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or_else(|| Workers::auto_split_depth(&pool));
+            .unwrap_or_else(|| Workers::auto_split_depth(threads));
         let split_depth = AtomicU32::new(split_depth);
         let num_threads = threads as usize;
         let lace = lace::Lace::init(num_threads);
@@ -58,6 +58,15 @@ impl Workers {
     #[cfg(not(feature = "lace"))]
     fn auto_split_depth(pool: &rayon::ThreadPool) -> u32 {
         let threads = pool.current_num_threads();
+        if threads > 1 {
+            (4096 * threads).ilog2()
+        } else {
+            0
+        }
+    }
+
+    #[cfg(feature = "lace")]
+    fn auto_split_depth(threads: u32) -> u32 {
         if threads > 1 {
             (4096 * threads).ilog2()
         } else {
