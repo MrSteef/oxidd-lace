@@ -129,6 +129,7 @@ where
 {
     type Context = ();
 
+    #[inline(always)]
     fn unary<'a>(
         self,
         op: UnaryOp<'a, M, Self>,
@@ -146,6 +147,7 @@ where
         ))
     }
 
+    #[inline(always)]
     fn binary<'a>(
         self,
         op: BinaryOp<'a, M, Self>,
@@ -163,6 +165,7 @@ where
         ))
     }
 
+    #[inline(always)]
     fn ternary<'a>(
         self,
         op: TernaryOp<'a, M, Self>,
@@ -188,6 +191,7 @@ where
         ))
     }
 
+    #[inline(always)]
     fn subst<'a>(
         self,
         op: SubstOp<'a, M, Self>,
