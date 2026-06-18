@@ -29,14 +29,26 @@ impl Workers {
             .stack_size(stack_size)
             .build()
             .expect("could not build thread pool");
-        let split_depth = AtomicU32::new(Workers::auto_split_depth(&pool));
+        // take split depth from env to easily benchmark different depths
+        // let split_depth = AtomicU32::new(Workers::auto_split_depth(&pool));
+        let split_depth = std::env::var("OXIDD_SPLIT_DEPTH")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(|| Workers::auto_split_depth(&pool));
+        let split_depth = AtomicU32::new(split_depth);
         Self { pool, split_depth }
     }
 
     #[cfg(feature = "lace")]
     pub(crate) fn new(threads: u32) -> Self {
         // stack size is not (yet) configurable in Lace
-        let split_depth = AtomicU32::new(0);
+        // take split depth from env to easily benchmark different depths
+        // let split_depth = AtomicU32::new(Workers::auto_split_depth(&pool));
+        let split_depth = std::env::var("OXIDD_SPLIT_DEPTH")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(|| Workers::auto_split_depth(&pool));
+        let split_depth = AtomicU32::new(split_depth);
         let num_threads = threads as usize;
         let lace = lace::Lace::init(num_threads);
         let lace_pool_id = lace.pool_id();
